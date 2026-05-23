@@ -1,0 +1,38 @@
+{
+    "hooks":  {
+                  "SessionStart":  [
+                                       {
+                                           "hooks":  [
+                                                         {
+                                                             "type":  "command",
+                                                             "command":  "powershell.exe -ExecutionPolicy Bypass -File \u0027<USER_HOME_MSYS>/.claude/scripts/claude-mem-autopatch.ps1\u0027 \u003e/dev/null 2\u003e\u00261 || true",
+                                                             "timeout":  20
+                                                         }
+                                                     ]
+                                       }
+                                   ],
+                  "PostCompact":  [
+                                      {
+                                          "hooks":  [
+                                                        {
+                                                            "type":  "command",
+                                                            "command":  "powershell.exe -ExecutionPolicy Bypass -File \u0027<USER_HOME_ESCAPED>\\.lark-cli\\daemon\\notify-once.ps1\u0027 -AutoBot -Text \u0027🔄 session 压缩完成（context reset），Feishu 长连接保持中\u0027 -Tag \u0027postcompact\u0027 -MinIntervalSec 30 \u003e/dev/null 2\u003e\u00261; exit 0",
+                                                            "timeout":  15
+                                                        }
+                                                    ]
+                                      },
+                                      {
+                                          "hooks":  [
+                                                        {
+                                                            "type":  "command",
+                                                            "command":  "COCKPIT_API_URL=http://localhost:8888 AGENT_ID=cfo python <USER_HOME_POSIX>/Desktop/finance-agent-spec/infra/claude-hooks/postcompact_handler.py",
+                                                            "timeout":  8
+                                                        }
+                                                    ]
+                                      }
+                                  ],
+                  "SessionEnd":  [
+
+                                 ]
+              }
+}

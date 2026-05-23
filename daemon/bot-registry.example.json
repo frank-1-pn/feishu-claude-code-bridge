@@ -1,0 +1,16 @@
+{
+  "_doc": "Maps Claude Code session (by CLAUDE_PROJECT_DIR substring) to feishu bot. Used by notify-once.ps1 -AutoBot. First match wins; default applies if none match. Add new projects as needed.",
+  "default": {
+    "chat_id": "<CHAT_ID_BOT_PRIMARY>",
+    "profile": "",
+    "alias": "Bot1 (笔记助手)"
+  },
+  "projects": [
+    {
+      "match_dir_contains": "finance-agent-spec",
+      "chat_id": "<CHAT_ID_FINANCE_AGENT>",
+      "profile": "finance-agent",
+      "alias": "finance-agent"
+    }
+  ]
+}

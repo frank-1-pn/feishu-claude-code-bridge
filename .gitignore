@@ -1,0 +1,25 @@
+# Per-session runtime (would leak live PIDs + chat IDs)
+binding-*.json
+
+# Runtime streams and logs
+*.ndjson
+*.log
+*.offset
+*.pid
+*.last
+
+# Local-only secrets map (must live outside repo by design; this is
+# belt-and-suspenders in case someone copies it in)
+sync-secrets.local.json
+sync-secrets*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# Don't commit the real bot-registry; only the example
+daemon/bot-registry.json
+!daemon/bot-registry.example.json
