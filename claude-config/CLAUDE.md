@@ -42,19 +42,26 @@ powershell.exe -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'
 
 用户未明确说"连" → 不连。所有 bot 都被占 → 告诉用户"全部占用中，是否切换 config 或暂不连"，让用户决定。
 
-### 4. 启 Monitor（用户同意后）
+### 4. 启 daemon + Monitor（用户同意后，2026-05-23 后 v4 参数化）
 
-按目标 bot 是否默认 config 二选一：
+目标 bot 在 `~/.lark-cli/daemon/bot-registry.json` 的 `bots` map 里登记了 `bot1` / `coding` / `finance`（对应表格 3 个 bot）。
 
-- **Bot1（默认 config）**：直接用 `lark-cli`，不带 `--profile`
-- **其他 bot**：必须加 `--profile <profile-name>`（例如 `--profile coding-assistant-claude`），让别的 session 能从 CommandLine 识别
+**先确保 daemon 在跑**（独立于 Claude session，活过 /compact）：
+```bash
+powershell.exe -ExecutionPolicy Bypass -File <USER_HOME>\.lark-cli\daemon\ensure-bot.ps1 -Bot <bot1|coding|finance> [-Profile <profile>]
+```
+- Bot1：`-Bot bot1`（无 -Profile）
+- 编程助手_claude：`-Bot coding -Profile coding-assistant-claude`
+- finance-agent：`-Bot finance -Profile finance-agent`
 
-Monitor 参数：
+`ensure-bot.ps1` 会顺手：① ndjson 日志 >50MB 轮转、② err log >10MB 轮转、③ 死 PID 的 binding 文件清理、④ >7 天的 notify-once dedup lock 清理、⑤ daemon 不健康就重起（杀同 bot 孤儿 + sleep 3s 让服务端释放连接 + `--force` 再连）。
+
+**再启 Monitor**（每个 Claude session 独有）：
 - `description`: `飞书 bot 消息（<别名>，已过滤噪音）`
 - `persistent: true`，`timeout_ms: 3600000`
-- `command`: `export PATH="$PATH:<USER_HOME_MSYS>/AppData/Roaming/npm" && stdbuf -oL lark-cli event +subscribe --event-types "im.message.receive_v1" --compact --as bot [--profile <name>] 2>&1 | awk '/^\{"chat_id"/{print; fflush()}'`
+- `command`: `bash <USER_HOME_MSYS>/.lark-cli/daemon/monitor-bot.sh <bot1|coding|finance>`
 
-过滤器屏蔽 SDK 噪音（已读回执等）；`stdbuf -oL` + `awk fflush()` 防 grep 缓冲卡 50 分钟（详见 memory `feedback_lark_monitor_pipe.md`）。**在对话里记住本 session 绑的 bot 别名 + chat_id**，别从表格默认值推断。
+monitor-bot.sh 读 `lark-<bot>-events.ndjson`，按 offset 接续（stream-ended 重启不漏消息）；awk 同时检测 `/compact!` 触发器透 `[COMPACT_TRIGGER]`。**在对话里记住本 session 绑的 bot 别名 + chat_id + Monitor task ID**。
 
 ### 5. 心跳确认
 
@@ -66,24 +73,16 @@ lark-cli im +messages-send --chat-id "<绑定 chat_id>" --text "✅ 长连接已
 
 ### 6. 写本 session 的 bot 绑定文件（让 PostCompact 等 hook 路由到对的 bot）
 
-启动 Monitor + 心跳成功后，**必须**写一份绑定文件，让全局 hook（PostCompact 用 `notify-once.ps1 -AutoBot`）能识别本 session 用哪个 bot。否则所有 session 的 /compact 提示都会落到默认 Bot1。
+启动 Monitor + 心跳成功后，**必须**写绑定文件，让全局 hook（PostCompact 用 `notify-once.ps1 -AutoBot`）识别本 session 用哪个 bot。否则所有 session 的 /compact 提示都会落到默认 Bot1。
 
-步骤：
-1. 找当前 claude.exe PID：`powershell.exe -File <USER_HOME>\AppData\Local\Temp\find-claude-test.ps1`（或自己写 BFS 爬 parent process）
-2. 写 `<USER_HOME>\.lark-cli\daemon\binding-<claude_pid>.json`，内容形如：
-   ```json
-   {
-     "claude_pid": <pid>,
-     "bot_alias": "<别名>",
-     "chat_id": "<oc_xxx>",
-     "profile": "<profile-name 或空字符串>",
-     "bound_at": "<ISO 时间>",
-     "monitor_task_id": "<Monitor task id>"
-   }
-   ```
-3. 项目目录映射可写进 `<USER_HOME>\.lark-cli\daemon\bot-registry.json` 的 `projects[]`（按 `match_dir_contains` 做子串匹配，作为 binding 文件不存在时的 fallback）
+**一行命令**（2026-05-23 自动化）：
+```bash
+powershell.exe -ExecutionPolicy Bypass -File <USER_HOME>\.lark-cli\daemon\write-binding.ps1 -Bot <bot1|coding|finance> [-MonitorTaskId <id>]
+```
 
-参考 memory `compact-notify-routing`。binding 文件 PID-scoped 会随 claude 进程结束自动失效（下次 session 用新 PID 重写）。
+脚本会自动：① 爬 parent process 找当前 claude.exe PID ② 从 bot-registry.json 的 `bots` map 查 chat_id/profile/alias ③ 写 `~/.lark-cli/daemon/binding-<claude_pid>.json`。返回 JSON `{ok:true, claude_pid, path, chat_id, ...}`。
+
+参考 memory `compact-notify-routing`。binding 文件 PID-scoped 随 claude 进程结束自然失效，下个 session 重写；ensure-bot.ps1 顺手清孤儿。
 
 ## 判活规则（用户问"飞书还在吗 / 连接正常吗 / 你又没回我"）
 

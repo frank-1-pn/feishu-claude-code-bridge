@@ -7,6 +7,11 @@
                                                              "type":  "command",
                                                              "command":  "powershell.exe -ExecutionPolicy Bypass -File \u0027<USER_HOME_MSYS>/.claude/scripts/claude-mem-autopatch.ps1\u0027 \u003e/dev/null 2\u003e\u00261 || true",
                                                              "timeout":  20
+                                                         },
+                                                         {
+                                                             "type":  "command",
+                                                             "command":  "powershell.exe -ExecutionPolicy Bypass -File \u0027<USER_HOME_MSYS>/.claude/scripts/claude-agent-sdk-autopatch.ps1\u0027 \u003e/dev/null 2\u003e\u00261 || true",
+                                                             "timeout":  20
                                                          }
                                                      ]
                                        }

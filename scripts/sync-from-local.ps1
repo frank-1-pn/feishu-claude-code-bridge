@@ -86,15 +86,33 @@ function Copy-Sanitized {
 }
 
 $Files = [ordered]@{
-    "$LarkDaemon\start-bot1.ps1"        = 'daemon\start-bot.ps1'
-    "$LarkDaemon\ensure-bot1.ps1"       = 'daemon\ensure-bot.ps1'
-    "$LarkDaemon\monitor-bot1.sh"       = 'daemon\monitor-bot.sh'
+    # parametrized daemon scripts (v4 post-2026-05-23)
+    "$LarkDaemon\start-bot.ps1"         = 'daemon\start-bot.ps1'
+    "$LarkDaemon\ensure-bot.ps1"        = 'daemon\ensure-bot.ps1'
+    "$LarkDaemon\monitor-bot.sh"        = 'daemon\monitor-bot.sh'
+    "$LarkDaemon\write-binding.ps1"     = 'daemon\write-binding.ps1'
+
+    # backward-compat shims (call parametrized scripts with -Bot bot1)
+    "$LarkDaemon\start-bot1.ps1"        = 'daemon\start-bot1.shim.ps1'
+    "$LarkDaemon\ensure-bot1.ps1"       = 'daemon\ensure-bot1.shim.ps1'
+    "$LarkDaemon\monitor-bot1.sh"       = 'daemon\monitor-bot1.shim.sh'
+
+    # compact orchestration helpers
     "$LarkDaemon\find-claude.ps1"       = 'daemon\find-claude.ps1'
     "$LarkDaemon\screenshot-window.ps1" = 'daemon\screenshot-window.ps1'
     "$LarkDaemon\send-keys.ps1"         = 'daemon\send-keys.ps1'
+
+    # router / notifier
     "$LarkDaemon\notify-once.ps1"       = 'daemon\notify-once.ps1'
     "$LarkDaemon\bot-registry.json"     = 'daemon\bot-registry.example.json'
+
+    # 7-fix plan doc (committed for posterity)
+    "$LarkDaemon\PLAN.md"               = 'daemon\PLAN.md'
+
+    # Claude Code config
     "$ClaudeHome\CLAUDE.md"             = 'claude-config\CLAUDE.md'
+
+    # vault note
     "$VaultGuide"                       = 'docs\integration-guide.md'
 }
 
