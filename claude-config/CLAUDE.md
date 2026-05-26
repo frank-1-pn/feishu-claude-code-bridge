@@ -73,7 +73,9 @@ lark-cli im +messages-send --chat-id "<绑定 chat_id>" --text "✅ 长连接已
 
 ### 6. 写本 session 的 bot 绑定文件（让 PostCompact 等 hook 路由到对的 bot）
 
-启动 Monitor + 心跳成功后，**必须**写绑定文件，让全局 hook（PostCompact 用 `notify-once.ps1 -AutoBot`）识别本 session 用哪个 bot。否则所有 session 的 /compact 提示都会落到默认 Bot1。
+> **2026-05-26 起 §4 的 `ensure-bot.ps1` 已自动写本步（B8）**——每次 ensure daemon 顺手写当前 PID 的 binding，本步现为**冗余保险**，跑不跑都行。根因：多数 session 从没单跑过 write-binding → 没 binding 文件 → PostCompact 回落 `registry/default`=Bot1，于是"所有 session 的 /compact 提示都落 Bot1"。已折叠进 ensure-bot 消除该失败面。
+
+启动 Monitor + 心跳成功后写绑定文件，让全局 hook（PostCompact 用 `notify-once.ps1 -AutoBot`）识别本 session 用哪个 bot。否则该 session 的 /compact 提示会落到默认 Bot1。
 
 **一行命令**（2026-05-23 自动化）：
 ```bash

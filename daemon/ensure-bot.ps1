@@ -114,6 +114,27 @@ function Invoke-BindingPrune {
     }
 }
 
+# B8: auto-write THIS session's pid->bot binding so PostCompact (-AutoBot)
+#     routes to the correct bot even if the manual write-binding step (§6) was
+#     skipped. Root-cause fix for "all sessions' compact notice go to Bot1":
+#     most live sessions never had a binding-<pid>.json, so notify-once fell
+#     back to registry.default (= Bot1). ensure-bot runs per-session at startup
+#     with -Bot, so it's the natural place to (re)write the binding each time.
+#     write-binding.ps1 guards with Find-ClaudePid -> if run outside a claude
+#     session (e.g. scheduled task) it exits without writing, so no mis-binding.
+function Invoke-WriteBinding {
+    $wb = Join-Path $DaemonDir 'write-binding.ps1'
+    if (-not (Test-Path $wb)) { return }
+    # Only pass -Profile when non-empty; passing '' would override the registry
+    # lookup inside write-binding and blank out finance/coding profiles.
+    if ($Profile) {
+        $out = & powershell -ExecutionPolicy Bypass -File $wb -Bot $Bot -Profile $Profile 2>&1
+    } else {
+        $out = & powershell -ExecutionPolicy Bypass -File $wb -Bot $Bot 2>&1
+    }
+    Write-Host "[ensure $Bot] write-binding: $out"
+}
+
 # B7: prune notify-once dedup locks older than $LockMaxAgeDays.
 function Invoke-LockPrune {
     if (-not (Test-Path $LockDir)) { return }
@@ -143,6 +164,7 @@ Invoke-NdjsonRotate
 $errKilled = Invoke-ErrLogRotate
 Invoke-BindingPrune
 Invoke-LockPrune
+Invoke-WriteBinding
 
 if ($errKilled -or -not (Test-DaemonHealthy)) {
     Write-Host "[ensure $Bot] daemon not healthy, (re)starting"
