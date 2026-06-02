@@ -48,8 +48,9 @@ powershell.exe -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'
 
 **先确保 daemon 在跑**（独立于 Claude session，活过 /compact）：
 ```bash
-powershell.exe -ExecutionPolicy Bypass -File <USER_HOME>\.lark-cli\daemon\ensure-bot.ps1 -Bot <bot1|coding|finance> [-Profile <profile>]
+powershell.exe -ExecutionPolicy Bypass -File <USER_HOME_POSIX>/.lark-cli/daemon/ensure-bot.ps1 -Bot <bot1|coding|finance> [-Profile <profile>]
 ```
+> ⚠️ **路径必须用正斜杠 `<USER_HOME_POSIX>/...`**。Bash 工具（git-bash）会把反斜杠当转义符吃掉，`-File <USER_HOME>\...` 会变成 `C:Userske...` → RC=127 报 `-File 格式不正确`。正斜杠 PowerShell 在 Windows 上照样认（或给整个路径加双引号 `"<USER_HOME>\..."` 也行）。本规则适用于本文件所有 `powershell.exe -File <路径>` 命令。
 - Bot1：`-Bot bot1`（无 -Profile）
 - 编程助手_claude：`-Bot coding -Profile coding-assistant-claude`
 - finance-agent：`-Bot finance -Profile finance-agent`
@@ -79,8 +80,9 @@ lark-cli im +messages-send --chat-id "<绑定 chat_id>" --text "✅ 长连接已
 
 **一行命令**（2026-05-23 自动化）：
 ```bash
-powershell.exe -ExecutionPolicy Bypass -File <USER_HOME>\.lark-cli\daemon\write-binding.ps1 -Bot <bot1|coding|finance> [-MonitorTaskId <id>]
+powershell.exe -ExecutionPolicy Bypass -File <USER_HOME_POSIX>/.lark-cli/daemon/write-binding.ps1 -Bot <bot1|coding|finance> [-MonitorTaskId <id>]
 ```
+（同 §4：路径用正斜杠，别用反斜杠。）
 
 脚本会自动：① 爬 parent process 找当前 claude.exe PID ② 从 bot-registry.json 的 `bots` map 查 chat_id/profile/alias ③ 写 `~/.lark-cli/daemon/binding-<claude_pid>.json`。返回 JSON `{ok:true, claude_pid, path, chat_id, ...}`。
 
