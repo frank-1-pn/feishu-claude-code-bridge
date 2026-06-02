@@ -50,6 +50,9 @@ claude-config/
   CLAUDE.md              global Claude Code preferences (startup
                          self-check, liveness rules, §6 binding step)
   settings.hooks.example.json   the hooks fragment for ~/.claude/settings.json
+  scripts/
+    pre-compact-model-switch.py    PreCompact: swap model to sonnet
+    post-compact-model-restore.py  PostCompact: restore prior model
 
 docs/
   integration-guide.md   long-form architecture write-up (v4.2)
@@ -87,7 +90,18 @@ scripts/
    `§6` which writes the per-session binding file).
 4. Merge `claude-config/settings.hooks.example.json` into your
    `~/.claude/settings.json` (keep your other settings; just bring
-   in the `hooks.PostCompact` entry).
+   in the `hooks.PostCompact` entry). Copy `claude-config/scripts/*.py`
+   to `~/.claude/scripts/` — the `Pre/PostCompact` model-switch hooks
+   reference them.
+
+   > **Heads-up:** the example fragment also references three scripts
+   > that live in *other* stacks and are **not** in this repo:
+   > `claude-mem-autopatch.ps1` + `claude-agent-sdk-autopatch.ps1`
+   > (claude-mem stack) and `finance-agent-spec/.../postcompact_handler.py`
+   > (a separate project). Drop those hook entries unless you also run
+   > those stacks — only `SessionStart` (skill loader), the
+   > `PostCompact notify-once.ps1 -AutoBot` entry, and the two bundled
+   > model-switch hooks are part of *this* Feishu bridge.
 5. Write `~/.lark-cli/sync-secrets.local.json` (see "Per-host secrets
    mapping" below). This is the **only** file in this whole setup
    that contains live secrets and it is the **only** file that must

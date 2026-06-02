@@ -1,5 +1,16 @@
 {
     "hooks":  {
+                  "PreCompact":  [
+                                     {
+                                         "hooks":  [
+                                                       {
+                                                           "type":  "command",
+                                                           "command":  "python <USER_HOME_POSIX>/.claude/scripts/pre-compact-model-switch.py",
+                                                           "timeout":  5
+                                                       }
+                                                   ]
+                                     }
+                                 ],
                   "SessionStart":  [
                                        {
                                            "hooks":  [
@@ -17,6 +28,15 @@
                                        }
                                    ],
                   "PostCompact":  [
+                                      {
+                                          "hooks":  [
+                                                        {
+                                                            "type":  "command",
+                                                            "command":  "python <USER_HOME_POSIX>/.claude/scripts/post-compact-model-restore.py",
+                                                            "timeout":  5
+                                                        }
+                                                    ]
+                                      },
                                       {
                                           "hooks":  [
                                                         {

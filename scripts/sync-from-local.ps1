@@ -1,4 +1,4 @@
-# Sync the Feishu/Lark Claude Code bridge from canonical local locations
+﻿# Sync the Feishu/Lark Claude Code bridge from canonical local locations
 # into this repo, sanitizing secrets via the per-host mapping file.
 #
 # Run from anywhere; the script resolves its own repo root:
@@ -111,6 +111,11 @@ $Files = [ordered]@{
 
     # Claude Code config
     "$ClaudeHome\CLAUDE.md"             = 'claude-config\CLAUDE.md'
+
+    # compact model-switch hooks (general harness; referenced by Pre/PostCompact
+    # in settings.hooks.example.json — bundled so a fresh clone is not dangling)
+    "$ClaudeHome\scripts\pre-compact-model-switch.py"   = 'claude-config\scripts\pre-compact-model-switch.py'
+    "$ClaudeHome\scripts\post-compact-model-restore.py" = 'claude-config\scripts\post-compact-model-restore.py'
 
     # vault note
     "$VaultGuide"                       = 'docs\integration-guide.md'
