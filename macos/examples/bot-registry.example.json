@@ -1,0 +1,36 @@
+{
+  "_comment": "Host-local registry for the macOS Feishu<->Claude Code multi-bot bridge. COPY to ~/.lark-cli/daemon/bot-registry.json and fill in real values. NEVER commit the real one (it is git-ignored). Secrets (app_secret) live ONLY in the lark-cli keychain, never here. 'default' is null ON PURPOSE: there is no default-bot fallback — if outbound routing cannot resolve a bot (no FEISHU_BOT env, no project-dir match), the bridge does NOT send; it asks the user which bot to use.",
+
+  "bots": {
+    "primary": {
+      "app_id": "cli_xxxxxxxxxxxxxxxx",
+      "profile": "cli_xxxxxxxxxxxxxxxx",
+      "chat_id": "oc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "alias": "My Maintenance Bot",
+      "as": "bot",
+      "event_types": "im.message.receive_v1",
+      "enabled": true,
+      "notify_on_restart": true,
+      "_note": "profile == app_id by convention (per-command `--profile <app_id>`). chat_id is the p2p single-chat between you and this bot. as=bot uses the tenant token from keychain (no user login needed)."
+    },
+    "project-dev": {
+      "app_id": "cli_yyyyyyyyyyyyyyyy",
+      "profile": "cli_yyyyyyyyyyyyyyyy",
+      "chat_id": "oc_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "alias": "Some Project Dev Bot",
+      "as": "bot",
+      "event_types": "im.message.receive_v1",
+      "enabled": true,
+      "notify_on_restart": true
+    }
+  },
+
+  "projects": [
+    {
+      "match_dir_contains": "some-project-dir-substring",
+      "bot": "project-dev"
+    }
+  ],
+
+  "default": null
+}

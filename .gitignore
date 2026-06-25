@@ -23,3 +23,12 @@ Thumbs.db
 # Don't commit the real bot-registry; only the example
 daemon/bot-registry.json
 !daemon/bot-registry.example.json
+
+# ── macOS port (macos/) ──────────────────────────────────────────────
+# Real registry must never be committed (it lives at ~/.lark-cli/daemon/);
+# these are belt-and-suspenders in case someone copies runtime files into the repo.
+macos/**/bot-registry.json
+!macos/examples/bot-registry.example.json
+*.err
+macos/**/*.log
+macos/**/*.err

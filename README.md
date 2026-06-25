@@ -15,7 +15,12 @@ the repo.
 > **Caveat.** This is a single-operator setup tuned to one machine.
 > The mechanisms generalize, but the specific paths, hook layout,
 > and registry shape assume Windows + Claude Code + lark-cli +
-> Git Bash / PowerShell. Linux/macOS adapters are not in scope.
+> Git Bash / PowerShell.
+>
+> **macOS port:** a `launchd`-based re-implementation lives in
+> [`macos/`](macos/) — same multi-bot / per-session-routing model,
+> native to macOS (`launchd` + `bash` + `lark-cli` keychain).
+> Start at [`macos/README.md`](macos/README.md).
 
 ## What it does
 
@@ -69,6 +74,13 @@ scripts/
   sync-from-local.ps1    pulls from the live install + auto-sanitizes
                          using ~/.lark-cli/sync-secrets.local.json,
                          then runs a leak-guard scan
+
+macos/                   macOS port (launchd-based; self-contained)
+  install.sh             one-shot framework installer for a new Mac
+  bin/                   the bridge scripts (→ ~/.claude/bin/feishu/)
+  examples/              bot-registry.example.json
+  docs/                  SETUP.md · MULTI-BOT.md · ARCHITECTURE.md
+  README.md              start here for macOS
 
 .gitignore               excludes per-session and runtime files
 ```
