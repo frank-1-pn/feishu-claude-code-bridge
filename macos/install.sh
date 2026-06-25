@@ -74,6 +74,6 @@ cat <<EOF
    $DEST/feishu-mem-install.sh <名字>
 
 完整说明:  macos/docs/SETUP.md(新机配置) · macos/docs/MULTI-BOT.md(多 bot 管理)
-机制/排错:  macos/docs/ARCHITECTURE.md · macos/docs/autoheal.md
+机制/排错:  macos/docs/ARCHITECTURE.md(§7 排错手册)
 EOF
 hr; say "框架安装完成。Bot 需要你按上面 ①–④ 手动加(因为要录密钥)。"; hr
