@@ -68,7 +68,7 @@ cat <<EOF
    $DEST/feishu-ensure.sh
 
 ④ 在 Claude Code 会话里 arm 事件桥接(否则消息进日志但 Claude 收不到):
-   Monitor:  tail -n 0 -F ~/Library/Logs/feishu/<名字>.log
+   Monitor:  $DEST/feishu-tail.sh <名字>   (过滤卡键乱码 + message_id 去重,免日志重放刷屏)
 
 (可选) 把入站消息捕获进 claude-mem(需本机已装并运行 claude-mem):
    $DEST/feishu-mem-install.sh <名字>

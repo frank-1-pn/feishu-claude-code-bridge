@@ -78,11 +78,15 @@ session 的 `tail` Monitor 是否还活着,重 arm + `tail -n 50` 补 gap(`-n 0`
 
 **(b) 对解析到的 bot,arm 事件桥接 Monitor(必需)**
 ```
-Monitor({ command: "tail -n 0 -F ~/Library/Logs/feishu/<bot>.log",
+Monitor({ command: "~/.claude/bin/feishu/feishu-tail.sh <bot>",
           description: "飞书事件桥接 <bot>", persistent: true, timeout_ms: 3600000 })
 ```
+- `feishu-tail.sh` = `tail -n 0 -F` + 两层防护(仍只读 tail):**message_id 去重**(seed 现有 id,
+  根治"日志被 launchd 重连重写/截断后 tail 从头重放历史"造成的【重复消息刷屏】)+ **卡键乱码过滤**
+  (丢 `A#`/`A #`/`A\` 等短串,防手机长按刷屏把 Monitor 冲到 auto-stop)。
 - `-n 0`:从末尾开始,跳过历史行(不重触发旧消息)。
 - 没解析到 bot → **不 arm、不发,问用户**要不要连、连哪个。
+- (裸 `tail -n 0 -F ~/Library/Logs/feishu/<bot>.log` 仍可用,但遇重写重放/卡键刷屏会刷屏或漏消息。)
 
 ---
 

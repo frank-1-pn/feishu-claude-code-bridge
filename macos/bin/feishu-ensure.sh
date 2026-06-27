@@ -32,7 +32,7 @@ fi
 # 本 session 绑定
 if RB="$(feishu_resolve_bot)"; then
   SRC="项目目录匹配"; [ -n "${FEISHU_BOT:-}" ] && SRC="环境变量 FEISHU_BOT"
-  echo "本 session 绑定 bot = $RB(来源: $SRC)→ 收消息: tail -n 0 -F $(feishu_log_path "$RB")"
+  echo "本 session 绑定 bot = $RB(来源: $SRC)→ arm Monitor: $DIR/feishu-tail.sh $RB  (过滤卡键乱码 + message_id 去重,免日志重放刷屏)"
 else
   echo "本 session 未绑定 bot(无 FEISHU_BOT、无项目匹配)→ 需要发飞书时,先问用户要不要连、连哪个 bot。"
 fi

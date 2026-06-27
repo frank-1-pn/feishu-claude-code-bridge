@@ -47,7 +47,7 @@ printf '%s' '<APP_SECRET>' | lark-cli profile add --app-id cli_xxx --name cli_xx
 # 4) 体检
 ~/.claude/bin/feishu/feishu-ensure.sh
 # 5) 在 Claude Code session 里 arm 事件桥接
-#    Monitor:  tail -n 0 -F ~/Library/Logs/feishu/primary.log
+#    Monitor:  ~/.claude/bin/feishu/feishu-tail.sh primary   (过滤卡键乱码 + message_id 去重,免重放刷屏)
 ```
 
 详细步骤见 **[docs/SETUP.md](docs/SETUP.md)**。
