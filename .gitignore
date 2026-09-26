@@ -32,3 +32,6 @@ macos/**/bot-registry.json
 *.err
 macos/**/*.log
 macos/**/*.err
+
+# Private durable message state
+daemon/state/
