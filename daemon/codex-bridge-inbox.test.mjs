@@ -83,6 +83,11 @@ test('timeout does not lose later reply or re-execute request',async t=>{
   assert.equal(f.q.jobs.get('om_a').status,'submitted');f.append(marker('a'),answer());await f.q.watch();await f.q.deliverReplies();
   assert.equal(f.injected.length,1);assert.equal(f.q.stats().completed_count,1);
 });
+test('delivery stall age measures submission rather than old queued or delivered work',async t=>{
+  const f=fixture(t);f.q.enqueue(event('a'));await f.q.dispatchOne();f.append(marker('a'));await f.q.watch();
+  f.q.enqueue(event('b'));f.setNow(200000);await f.q.dispatchOne();
+  assert.ok(f.q.stats().oldest_pending_seconds>120);assert.equal(f.q.stats().oldest_undelivered_seconds,0);
+});
 test('normalizes compact images, JSON files and post images; does not fetch text resembling resource key',()=>{
   assert.equal(normalizeEvent(event('a','image','[Image: img_v3_hello-world]')).resources[0].key,'img_v3_hello-world');
   const n=normalizeEvent(event('a','file',JSON.stringify({file_key:'file_v3_key',file_name:'../../evil.exe'})));

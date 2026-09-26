@@ -12,7 +12,8 @@
  *
  * Runtime logs and status contain metadata only; message and response bodies
  * are never written to them. A response body may exist briefly in the private
- * TEMP outbox so a transient send failure does not rerun the Codex turn.
+ * outbox so a transient send failure does not rerun the Codex turn. V2 keeps
+ * private input and delivery state under daemon/state, outside Git.
  */
 
 import fs from 'node:fs';
@@ -1211,7 +1212,7 @@ async function durableBotLoops(binding) {
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
     updateBotStatus(binding.bot,{...stats,state:stats.failed_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
-      delivery_stalled:stats.awaiting_delivery_count>0 && stats.oldest_pending_seconds>120});
+      delivery_stalled:stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120});
   };
   await Promise.all([loop('intake',intake),loop('dispatch',()=>inbox.dispatchOne()),
     loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000)]);

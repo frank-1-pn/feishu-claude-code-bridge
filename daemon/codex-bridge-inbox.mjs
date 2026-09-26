@@ -159,6 +159,7 @@ export class DurableInbox {
       awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
       failed_count: count(['failed']), completed_count: count(['done']),
       oldest_pending_seconds: Math.round(Math.max(0, ...all.filter(j => j.status !== 'done' && j.status !== 'failed').map(j => (this.now()-j.acceptedAt)/1000))),
+      oldest_undelivered_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'submitted').map(j => (this.now()-j.submittedAt)/1000))),
       last_delivered_at: Math.max(0,...all.map(j=>j.deliveredAt??0)) || null };
   }
 }
