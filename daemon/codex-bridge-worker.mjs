@@ -1210,7 +1210,7 @@ async function durableBotLoops(binding) {
     await inbox.watch();
     const stats=inbox.stats();
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
-    updateBotStatus(binding.bot,{...stats,state:stats.failed_count?'degraded':busy?'processing':'idle',
+    updateBotStatus(binding.bot,{...stats,state:stats.failed_count||stats.watch_error_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120});
   };

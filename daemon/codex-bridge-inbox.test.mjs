@@ -78,6 +78,11 @@ test('current final phase and task completion are supported without duplicate re
   f.append(marker('a'),answer('done','final'),{type:'event_msg',payload:{type:'task_complete',last_agent_message:'done'}});
   await f.q.watch();await f.q.deliverReplies();await f.q.watch();await f.q.deliverReplies();assert.equal(f.sent.length,1);
 });
+test('large screenshot/tool JSONL line cannot block markers and final after it',async t=>{
+  const f=fixture(t);f.q.enqueue(event('a'));await f.q.dispatchOne();
+  f.append({type:'response_item',payload:{type:'custom_tool_call_output',output:'x'.repeat(3*1024*1024)}},marker('a'),answer('after large tool'));
+  await f.q.watch();await f.q.deliverReplies();assert.equal(f.q.stats().completed_count,1);assert.equal(f.sent[0].text,'after large tool');
+});
 test('timeout does not lose later reply or re-execute request',async t=>{
   const f=fixture(t);f.q.enqueue(event('a'));await f.q.dispatchOne();f.setNow(3000);await f.q.watch();await f.q.deliverReplies();
   assert.equal(f.q.jobs.get('om_a').status,'submitted');f.append(marker('a'),answer());await f.q.watch();await f.q.deliverReplies();

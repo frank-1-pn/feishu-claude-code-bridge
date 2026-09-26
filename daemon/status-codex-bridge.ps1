@@ -115,6 +115,7 @@ if ($bindings -and $bindings.bindings) {
             awaiting_reply_count = if ($botState) { $botState.awaiting_reply_count } else { $null }
             reply_pending_count = if ($botState) { $botState.reply_pending_count } else { $null }
             failed_count = if ($botState) { $botState.failed_count } else { $null }
+            watch_error_count = if ($botState) { $botState.watch_error_count } else { $null }
             completed_count = if ($botState) { $botState.completed_count } else { $null }
             oldest_pending_seconds = if ($botState) { $botState.oldest_pending_seconds } else { $null }
             last_delivered_at = if ($botState) { $botState.last_delivered_at } else { $null }
@@ -130,7 +131,7 @@ $healthy = [bool]($identityOk -and $heartbeatFresh -and $botsHealthy)
 $report = [ordered]@{
     healthy = $healthy
     transport_healthy = $healthy
-    delivery_healthy = [bool]($healthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 }).Count -eq 0)
+    delivery_healthy = [bool]($healthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 -or $_.watch_error_count -gt 0 }).Count -eq 0)
     health_scope = 'healthy reports process/transport; delivery_healthy additionally checks queue failures and stalls; last_delivered_at is rollout evidence'
     checked_at = [DateTimeOffset]::UtcNow.ToString('o')
     bridge = [ordered]@{

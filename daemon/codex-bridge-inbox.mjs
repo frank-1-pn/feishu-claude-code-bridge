@@ -88,9 +88,17 @@ export class DurableInbox {
     const stat = fs.statSync(j.rollout, { throwIfNoEntry: false });
     if (!stat || stat.size < j.cursor) throw new Error('rollout_missing_or_truncated');
     if (stat.size === j.cursor) return [];
-    const b = Buffer.alloc(Math.min(stat.size-j.cursor, 1024*1024));
+    const available = stat.size-j.cursor;
+    let b = Buffer.alloc(Math.min(available, 1024*1024));
     const fd = fs.openSync(j.rollout, 'r');
-    let n; try { n = fs.readSync(fd, b, 0, b.length, j.cursor); } finally { fs.closeSync(fd); }
+    let n;
+    try {
+      for (;;) {
+        n = fs.readSync(fd, b, 0, b.length, j.cursor);
+        if (b.subarray(0,n).includes(10) || n < b.length || b.length >= available || b.length >= 64*1024*1024) break;
+        b = Buffer.alloc(Math.min(available,b.length*2,64*1024*1024));
+      }
+    } finally { fs.closeSync(fd); }
     const progress = []; let pos = 0;
     for (;;) {
       const end = b.indexOf(10, pos); if (end < 0 || end >= n) break;
@@ -118,15 +126,17 @@ export class DurableInbox {
         break;
       }
     }
-    if (!pos && n === b.length && b.length === 1024*1024) throw new Error('oversize_rollout_record');
+    if (!pos && n >= 64*1024*1024) throw new Error('oversize_rollout_record');
     j.cursor += pos; this.save(j); return progress;
   }
   async watch() {
     const progress = new Set();
     for (const j of this.jobs.values()) {
       if (!['submitted','delivered'].includes(j.status)) continue;
-      try { for (const t of this.scan(j)) progress.add(t); }
-      catch { j.error = 'rollout_read_failed'; this.save(j); }
+      try {
+        for (const t of this.scan(j)) progress.add(t);
+        if(j.error==='rollout_read_failed'){delete j.error;this.save(j);}
+      } catch { j.error = 'rollout_read_failed'; this.save(j); }
       // Timed-out jobs remain watched; late delivery/final may still arrive.
       if (this.now() - j.submittedAt > this.timeoutMs && !j.timeoutNotified) {
         j.notice = j.markerSeen ? '消息已送入 Codex，但答复等待超时；仍在跟踪，不会重复执行。' : '消息已保存，但尚未确认进入 Codex；仍在跟踪，请查看桌面会话状态。';
@@ -158,6 +168,7 @@ export class DurableInbox {
     return { queued_count: count(['queued']), awaiting_delivery_count: count(['submitted']),
       awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
       failed_count: count(['failed']), completed_count: count(['done']),
+      watch_error_count: all.filter(j=>j.error==='rollout_read_failed').length,
       oldest_pending_seconds: Math.round(Math.max(0, ...all.filter(j => j.status !== 'done' && j.status !== 'failed').map(j => (this.now()-j.acceptedAt)/1000))),
       oldest_undelivered_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'submitted').map(j => (this.now()-j.submittedAt)/1000))),
       last_delivered_at: Math.max(0,...all.map(j=>j.deliveredAt??0)) || null };
