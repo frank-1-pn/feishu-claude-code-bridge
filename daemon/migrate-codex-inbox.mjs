@@ -31,17 +31,20 @@ for(const [bot,binding] of Object.entries(config.bindings)){
     events.push(e);
   }
   const rollout=findRollout(path.join(config.runtime.codex_home,'sessions'),binding.codex_thread_id);
-  const markers=new Map();let offset=0;
+  const markers=new Map();const markerCounts=new Map();let offset=0;
   let pending=Buffer.alloc(0);
   for await(const chunk of fs.createReadStream(rollout)){
     pending=Buffer.concat([pending,chunk]);
     for(;;){
       const end=pending.indexOf(10);if(end<0)break;
       const bytes=pending.subarray(0,end+1);const line=bytes.toString('utf8');
-      if(line.includes('????')){
+      if(line.includes('\u98de\u4e66\u6d88\u606f')){
         let item;try{item=JSON.parse(line);}catch{}
         if(item?.type==='response_item'&&item.payload?.role==='user'){
-          for(const e of events){const id=e.message_id??e.id;if(JSON.stringify(item.payload.content).includes(`[?????${bot}?${id}]`))markers.set(id,offset);}
+          for(const e of events){const id=e.message_id??e.id;if(JSON.stringify(item.payload.content).includes(`[\u98de\u4e66\u6d88\u606f\uff5c${bot}\uff5c${id}]`)){
+            if(!markers.has(id))markers.set(id,offset);
+            markerCounts.set(id,(markerCounts.get(id)??0)+1);
+          }}
         }
       }
       offset+=bytes.length;pending=pending.subarray(end+1);
@@ -53,8 +56,15 @@ for(const [bot,binding] of Object.entries(config.bindings)){
     const id=e.message_id??e.id;
     const outbox=path.join(state,`outbox-${bot}-${id}.txt`);
     const status=fs.existsSync(outbox)?'reply_pending':markers.has(id)?'submitted':'queued';
-    report.push({messageId:id,type:e.message_type,status});
-    if(!apply||inbox.jobs.has(id))continue;
+    report.push({messageId:id,type:e.message_type,status,markerCount:markerCounts.get(id)??0});
+    if(!apply)continue;
+    if(inbox.jobs.has(id)){
+      const existing=inbox.jobs.get(id);
+      if(process.argv.includes('--reconcile') && markers.has(id) && ['queued','submitted'].includes(existing.status)){
+        existing.status='submitted';existing.rollout=rollout;existing.cursor=markers.get(id);existing.submittedAt=Number(e.create_time)||Date.now();inbox.save(existing);
+      }
+      continue;
+    }
     const j=inbox.enqueue(e);j.receipted=receipts.includes(id);
     if(status==='reply_pending'){
       j.status=status;j.reply=fs.readFileSync(outbox,'utf8');j.replyKey=digest(`legacy:${bot}:${id}`);

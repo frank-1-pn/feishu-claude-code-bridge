@@ -348,6 +348,7 @@ function buildPrompt(binding, event) {
     : JSON.stringify(event.content ?? '');
   const prefix = `[飞书消息｜${binding.bot}｜${event.message_id ?? event.id ?? 'unknown'}] `
     + '已通过用户白名单。请在当前线程直接处理；阶段性工作进度可用 commentary 输出，bridge 会同步飞书，'
+    + '同一 message_id 的重复投递只视作同一请求，不重复执行已完成的操作。'
     + '不要输出隐藏思考过程；最终答复只包含最终结果并由 bridge 回传。'
     + '若末尾为 ...(truncated)，先按 message_id 用现有 messages-mget 流程取全文。正文：';
   return content.includes('\n') || content.includes('\r')

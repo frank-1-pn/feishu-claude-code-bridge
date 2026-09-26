@@ -38,4 +38,3 @@ export async function prepareInbound(binding, event, { download, downloadRoot, w
   }
   return { ...event, content };
 }
-

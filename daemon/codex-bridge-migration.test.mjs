@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+test('migration recognizes exact Chinese markers with CRLF byte offsets and never requeues active request',t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-migration-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const sessions=path.join(root,'sessions');fs.mkdirSync(sessions);
+  const thread='11111111-1111-4111-8111-111111111111';
+  const marker={type:'response_item',payload:{role:'user',type:'message',content:[{type:'input_text',text:'[飞书消息｜test｜om_existing] 中文'}]}};
+  const prefix=JSON.stringify({type:'test',text:'前置中文'})+'\r\n';
+  fs.writeFileSync(path.join(sessions,`rollout-${thread}.jsonl`),prefix+JSON.stringify(marker)+'\r\n'+JSON.stringify(marker)+'\n');
+  const binding={chat_id:'oc_test',allowed_sender_id:'ou_test',codex_thread_id:thread};
+  const cfg=path.join(root,'bindings.json');
+  fs.writeFileSync(cfg,JSON.stringify({runtime:{codex_home:root,max_event_age_ms:86400000},bindings:{test:binding}}));
+  const events=['existing','image'].map((id,i)=>({type:'im.message.receive_v1',message_id:`om_${id}`,chat_id:'oc_test',sender_id:'ou_test',create_time:String(Date.now()),message_type:i?'image':'text',content:i?'[Image: img_v3_key]':'hello'}));
+  fs.writeFileSync(path.join(root,'lark-test-events.ndjson'),events.map(e=>JSON.stringify(e)+'\n').join(''));
+  const script=fileURLToPath(new URL('./migrate-codex-inbox.mjs',import.meta.url));
+  const run=(args)=>spawnSync(process.execPath,[script,cfg,...args],{env:{...process.env,TEMP:root,TMP:root,TMPDIR:root},encoding:'utf8'});
+  const dry=run([]);assert.equal(dry.status,0,dry.stderr);
+  const result=JSON.parse(dry.stdout);assert.equal(result.messages[0].status,'submitted');assert.equal(result.messages[0].markerCount,2);
+  assert.equal(result.messages[1].status,'queued');assert.equal(fs.existsSync(path.join(root,'state')),false);
+  const applied=run(['--apply']);assert.equal(applied.status,0,applied.stderr);
+  const d=path.join(root,'state','codex-inbox-v2','test');
+  const jobs=fs.readdirSync(d).map(n=>JSON.parse(fs.readFileSync(path.join(d,n),'utf8')));
+  assert.equal(jobs.find(j=>j.id==='om_existing').cursor,Buffer.byteLength(prefix));
+  assert.equal(jobs.find(j=>j.id==='om_existing').status,'submitted');
+});
