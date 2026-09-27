@@ -189,10 +189,18 @@ export class DurableOutbound {
     if (!delivered) await this.text(presentation?.fallbackText??clean, replyKey,route);
   }
 
-  interactive(card,key,{route,onMessage}={}) {
+  interactive(card,key,{route,onMessage,renderVersion=1}={}) {
     return this.serial(async()=>{
       const file=this.file('interactive',key),hash=digest(JSON.stringify(card));
-      const s=this.read(file,{hash,route});if(s.hash!==hash)throw Object.assign(Error('interactive_payload_changed'),{permanent:true});
+      if(!Number.isSafeInteger(renderVersion)||renderVersion<1)throw Object.assign(Error('interactive_render_version_invalid'),{permanent:true});
+      const s=this.read(file,{hash,route,renderVersion});
+      if(s.hash!==hash){
+        if(renderVersion<=(s.renderVersion??1))throw Object.assign(Error('interactive_payload_changed'),{permanent:true});
+        // Explicit renderer upgrades reuse the same bound message and callback
+        // context. Only its presentation changes; the create shell is immutable.
+        s.hash=hash;s.renderVersion=renderVersion;s.patched=false;atomicWriteJson(file,s);
+      }
+      else if(renderVersion>(s.renderVersion??1)){s.renderVersion=renderVersion;atomicWriteJson(file,s);}
       if(!fs.existsSync(file))atomicWriteJson(file,s);
       if(!s.messageId){
         const shell=streamCard('正在准备确认表单…',false);

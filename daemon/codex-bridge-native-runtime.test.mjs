@@ -124,7 +124,8 @@ test('overlong voice confirmation is not truncated and never reaches the model',
 test('native task button opens a bound form, then creates for self and delivers the task link once', async t => {
   const f = fixture(t), form = await f.openTask();
   assert.ok(form.messageId); assert.match(JSON.stringify(f.patches[0]), /北京时间/);
-  const click = f.callback(form.contextId, { summary: '明天核对库存', due: '2026-10-01 09:00', reminder: '15' });
+  assert.match(JSON.stringify(f.patches[0]), /picker_datetime/);
+  const click = f.callback(form.contextId, { summary: '明天核对库存', due: '2026-10-01 09:00 +0800', reminder: '15' });
   assert.equal(f.native.acceptCallback(click).accepted, true); await f.native.drain();
   const taskCalls = f.calls.filter(args => args[0] === 'task'); assert.equal(taskCalls.length, 1);
   const body = JSON.parse(taskCalls[0].at(-1)); assert.deepEqual(body.members, [{ id: f.binding.allowed_sender_id, type: 'user', role: 'assignee' }]);

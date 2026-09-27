@@ -39,6 +39,32 @@ const sentCalls=f=>f.server.calls.filter(c=>c.method==='POST'&&(c.url==='/open-a
 const textCalls=f=>sentCalls(f).filter(c=>c.data.msg_type==='text');
 const finalState=(f,key='turn')=>f.outbound.read(f.outbound.file('card',key));
 
+test('explicit form renderer upgrade patches the same message and recovers an uncertain patch without resending',async t=>{
+  const f=fixture(t),oldCard={schema:'2.0',body:{elements:[{tag:'input',name:'due'}]}},
+    picker={schema:'2.0',body:{elements:[{tag:'picker_datetime',name:'due'}]}};
+  const first=await f.outbound.interactive(oldCard,'existing_form',{route:f.route});
+  // Emulate a journal from the version before renderVersion existed.
+  const file=f.outbound.file('interactive','existing_form'),old=f.outbound.read(file);delete old.renderVersion;fs.writeFileSync(file,JSON.stringify(old));
+  let lost=true;f.server.after=async c=>{if(c.method==='PATCH'&&lost){lost=false;throw Object.assign(Error('ack lost'),{code:'ETIMEDOUT'});}};
+  await assert.rejects(f.outbound.interactive(picker,'existing_form',{route:f.route,renderVersion:2}));
+  assert.equal(f.outbound.read(file).renderVersion,2);assert.equal(f.outbound.read(file).patched,false);
+  ({outbound:f.outbound}=f.reload());
+  const recovered=await f.outbound.interactive(picker,'existing_form',{route:f.route,renderVersion:2});
+  assert.equal(first.message_id,recovered.message_id);assert.equal(sentCalls(f).length,1);
+  assert.equal(f.outbound.read(file).patched,true);
+  const patches=f.server.calls.filter(c=>c.method==='PATCH');assert.deepEqual(patches.at(-1),patches.at(-2));
+  await assert.rejects(f.outbound.interactive(oldCard,'existing_form',{route:f.route,renderVersion:2}),/interactive_payload_changed/);
+});
+
+test('same-layout renderer version bumps are durable and cannot later mutate at the same version',async t=>{
+  const f=fixture(t),card={schema:'2.0',body:{elements:[]}};
+  await f.outbound.interactive(card,'form',{route:f.route});
+  const count=f.server.calls.length;
+  await f.outbound.interactive(card,'form',{route:f.route,renderVersion:2});assert.equal(f.server.calls.length,count);
+  assert.equal(f.outbound.read(f.outbound.file('interactive','form')).renderVersion,2);
+  await assert.rejects(f.outbound.interactive({...card,header:{}},'form',{route:f.route,renderVersion:2}),/interactive_payload_changed/);
+});
+
 test('quoted progress and final share one routed message through restart; final cannot regress',async t=>{
   const f=fixture(t);f.outbound.progress('正在整理公开资料。','turn',f.route);await f.outbound.flushCards();
   await f.outbound.final('结论已经确认。','answer',['turn'],{status:'complete',replyRoute:f.route});

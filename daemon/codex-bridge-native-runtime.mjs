@@ -11,7 +11,7 @@ import { safeHttpUrl } from './codex-bridge-presentation.mjs';
 
 const fail = code => { throw Object.assign(Error(code), { code, permanent: true }); };
 const voiceFields = [{ name: 'transcript', label: '确认或修正后的文字', type: 'text', required: true, maxLength: 6000 }];
-const taskNotice = '负责人仅为你自己；截止时间使用北京时间。留空表示不设截止时间；设置提醒必须同时填写截止时间。确认后才创建待办。';
+const taskNotice = '负责人仅为你自己。截止时间可点选日期和时间，按北京时间计算；不选则不设截止时间。设置提醒需先选择截止时间，点击“确认创建”后才生成待办。';
 function taskSummary(answer) {
   const first = String(answer).split(/\r?\n/).find(line => line.trim())?.replace(/^\s*[#>*-]+\s*/u, '').trim() ?? '';
   let value = '';
@@ -52,7 +52,9 @@ export class NativeInteractions {
     } });
   }
   async showForm(context, card, key, jobId) {
-    return this.outbound.interactive(card, key, { route: this.route(jobId), onMessage: messageId => this.actions.bindMessage(context.contextId, messageId) });
+    return this.outbound.interactive(card, key, { route: this.route(jobId),
+      renderVersion:context.kind==='task_create'?2:1,
+      onMessage: messageId => this.actions.bindMessage(context.contextId, messageId) });
   }
   async taskForm(operation, { correction = false, notice = taskNotice } = {}) {
     this.source(operation.sourceJobId);
@@ -77,7 +79,7 @@ export class NativeInteractions {
     catch (error) {
       if (['invalid_task_due', 'invalid_task_reminder', 'invalid_task_summary', 'invalid_task_fields'].includes(error.code)) {
         await this.taskForm(operation, { correction: true,
-          notice: '尚未创建待办。请检查事项、截止时间和提醒：时间示例 2026-10-01 09:00，均按北京时间；没有截止时间时不能设置提醒。' });
+          notice: '尚未创建待办。请检查事项，并点选截止日期和时间（北京时间）；不设截止时间时请选择“不提醒”。' });
         return { status: 'blocked', error: error.code };
       }
       throw error;

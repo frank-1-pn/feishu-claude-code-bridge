@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {NativeActionStore,button,formCard} from './codex-bridge-native-actions.mjs';
+import {TASK_FORM_FIELDS,taskDue} from './codex-bridge-tasks.mjs';
 
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'native-actions-test-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
@@ -131,4 +132,44 @@ test('pending handler results remain queued with bounded backoff; uncertain resu
   f.advance(300000);await store.drain({handlers:{task_create:async()=>({status:'uncertain',error:'task_result_needs_verification'})}});
   assert.equal(store.stats().native_action_blocked_count,1);assert.equal(store.stats().native_action_done_count,0);
   await store.drain({handlers});assert.equal(calls,1);
+});
+
+test('task due renders an optional native datetime picker on both new and already registered text schemas',t=>{
+  const f=fixture(t);
+  for(const form of [f.registration.form,{fields:TASK_FORM_FIELDS}]){
+    const {context}=f.ready(f.make(),{...f.registration,key:`picker_${form.fields[0].maxLength}`,form});
+    const card=formCard(context),elements=card.body.elements[0].elements;
+    const picker=elements.find(element=>element.name==='due');
+    assert.equal(picker.tag,'picker_datetime');assert.equal(picker.required,false);
+    assert.equal(picker.width,'fill');assert.equal(picker.initial_datetime,undefined);
+    assert.equal(picker.behaviors,undefined); // Selection alone cannot submit.
+    assert.ok(elements.some(element=>element.form_action_type==='submit'));
+    assert.ok(!JSON.stringify(card).includes('YYYY-MM-DD'));
+    const selected=formCard(context,{defaults:{due:'2028-02-29 09:30'}});
+    assert.equal(selected.body.elements[0].elements.find(element=>element.name==='due').initial_datetime,'2028-02-29 09:30');
+    const correction=formCard(context,{defaults:{due:'2026-02-30 09:30'}});
+    assert.equal(correction.body.elements[0].elements.find(element=>element.name==='due').initial_datetime,undefined);
+  }
+});
+
+test('picker form values normalize before length validation and replay deduplication, keeping Beijing wall time',async t=>{
+  const f=fixture(t),{store,context}=f.ready(f.make(),{...f.registration,form:{fields:TASK_FORM_FIELDS}});
+  const values={summary:'选择时间',due:'2026-10-01 09:30 +0800',reminder:'15'};
+  assert.equal(store.acceptCallback(f.callback(context,values),f.auth).accepted,true);
+  assert.equal(store.acceptCallback(f.callback(context,{...values,due:'2026-10-01 09:30'},'plain_retry'),f.auth).duplicate,true);
+  assert.equal(store.acceptCallback(f.callback(context,{...values,due:'2026-10-01 09:30 -0700'},'device_zone'),f.auth).duplicate,true);
+  let confirmed;await store.drain({handlers:{task_create:async op=>{confirmed=op.values;}}});
+  assert.equal(confirmed.due,'2026-10-01 09:30');
+  assert.equal(taskDue(confirmed.due).timestamp,String(Date.UTC(2026,9,1,1,30)));
+  const picked=f.callback(context,values,'picker_only');picked.event.action.tag='picker_datetime';
+  assert.equal(store.acceptCallback(picked,f.auth).accepted,false);
+});
+
+test('empty picker creates no deadline and malformed picker values cannot create an operation',async t=>{
+  const f=fixture(t),{store,context}=f.ready(f.make(),{...f.registration,form:{fields:TASK_FORM_FIELDS}});
+  for(const due of [{value:'2026-10-01 09:30'},'2026-10-01 09:30 +1460','2026-10-01 09:30 +1500','2026-10-01 09:30 Z','2026-10-01 09:30 +0800 trailing'])
+    assert.equal(store.acceptCallback(f.callback(context,{summary:'test',due},'invalid'),f.auth).reason,'invalid_form_values');
+  assert.equal(store.stats().native_action_accepted_count,0);
+  assert.equal(store.acceptCallback(f.callback(context,{summary:'无截止时间',due:null},'blank'),f.auth).accepted,true);
+  let due;await store.drain({handlers:{task_create:async op=>{due=taskDue(op.values.due);}}});assert.equal(due,undefined);
 });

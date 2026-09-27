@@ -6,6 +6,7 @@ import { atomicWriteJson } from './codex-bridge-storage.mjs';
 import { normalizeActionCallback } from './codex-bridge-actions.mjs';
 import { bindingSnapshot } from './codex-bridge-ux.mjs';
 import { recordFailure } from './codex-bridge-retry.mjs';
+import { taskDue } from './codex-bridge-tasks.mjs';
 
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
@@ -66,7 +67,7 @@ function normalizeData(kind,data) {
   return copy(data);
 }
 
-function parseValues(raw,form) {
+function parseValues(raw,form,kind) {
   if (!plain(raw)) fail('invalid_form_values');
   const acceptedNames = form.fields.flatMap(field => field.type==='text' && field.maxLength>1000
     ? Array.from({length:Math.ceil(field.maxLength/999)},(_,i)=>`${field.name}_${i+1}`) : [field.name]);
@@ -83,6 +84,15 @@ function parseValues(raw,form) {
     } else value = raw[field.name] ?? '';
     if (typeof value !== 'string') fail('invalid_form_values');
     value = value.trim();
+    if(kind==='task_create' && field.name==='due') {
+      // Feishu appends the device's offset as reference metadata. The picker
+      // explicitly asks for Beijing wall time, as did the legacy text input.
+      const picked=/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) ([+-])(\d{2})(\d{2})$/.exec(value);
+      if(picked){
+        if(+picked[3]>14 || +picked[4]>59 || (+picked[3]===14 && +picked[4]!==0))fail('invalid_form_values');
+        value=picked[1];
+      }
+    }
     if (field.required && !value) fail('invalid_form_values');
     if (field.type==='text' && value.length>field.maxLength) fail('invalid_form_values');
     if (field.type==='select' && value && !field.options.some(option=>option.value===value)) fail('invalid_form_values');
@@ -155,7 +165,7 @@ export class NativeActionStore {
       if(!context.messageId)fail('unbound_card');
       if(callback.context?.open_message_id!==context.messageId)fail('unauthorized');
       if(this.now()>=context.expiresAt)fail('expired');
-      const values=parseValues(callback.action.form_value??{},context.form);
+      const values=parseValues(callback.action.form_value??{},context.form,context.kind);
       const logical=digest(JSON.stringify([context.contextId,values]));
       const replayHashes=[];
       if(typeof callback.eventId==='string'&&callback.eventId&&callback.eventId.length<=256)replayHashes.push(digest(`event:${callback.eventId}`));
@@ -253,7 +263,15 @@ export function formCard(context,{title='确认操作',notice='',fields=context.
     const value=defaults[field.name]??'';
     if(typeof value!=='string'||(field.type==='text'&&value.length>field.maxLength)
       ||(field.type==='select'&&value&&!field.options.some(option=>option.value===value)))throw Error('invalid_native_action_default');
-    if(field.type==='text'){
+    if(context.kind==='task_create' && field.name==='due'){
+      // Keep the signed form schema and callback name stable so already-sent
+      // forms can use the picker without invalidating their confirmation keys.
+      let initial;
+      try {if(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value) && taskDue(value))initial=value;}catch{}
+      elements.push({tag:'markdown',content:'截止时间（按北京时间选择，可不选）'},
+        {tag:'picker_datetime',element_id:'native_due',name:field.name,required:field.required,width:'fill',
+          placeholder:plainText('选择日期和时间（可不选）'),...(initial?{initial_datetime:initial}:{})});
+    }else if(field.type==='text'){
       const split=field.maxLength>1000,chunks=split?inputChunks(value):[value],count=chunks.length;
       for(let part=0;part<count;part++)elements.push({tag:'input',element_id:`native_${field.name}_${part}`,name:split?`${field.name}_${part+1}`:field.name,
         label:plainText(count>1?`${field.label}（${part+1}/${count}）`:field.label),label_position:'top',
