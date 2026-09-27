@@ -98,3 +98,37 @@ verifies the normal direct connection. Its diagnostic route has a 45-second
 lease renewed by the runner; a crashed runner cannot leave a long-lived route.
 The fault relay also hides upstream closes while blackholing, so a server close
 cannot accidentally turn the half-open test into an ordinary TCP disconnect.
+
+## Deployment acceptance, 2026-09-27
+
+- Deployed runtime source: `ba7b5d9`; hidden task entrypoint: `759f121`.
+  Reproducible live fault runner: `b787fb6`. The installed eight runtime files
+  and runtime skill matched their repository copies byte for byte.
+- Built CLI version: `1.0.39-bridge-heartbeat.1`; SHA-256
+  `0c90034d9cac86cda11a9d79e846781bdb22d9d2dd30a020ca6006ebd4693076`.
+  The installed binary matched its build manifest. Both bots reported real
+  pongs; the observed server heartbeat interval was 90 seconds.
+- Bridge regression: 113 tests passed. The patched Go subscriber package passed
+  including its three local heartbeat tests; the upstream Windows-incompatible
+  fixture described above remained explicitly excluded.
+- Live test on one bot discarded encrypted network bytes while retaining its
+  client socket/process. `pong_timeout` was detected 93 seconds after injection;
+  the scheduled watchdog replaced only that subscriber at 143 seconds. Network
+  restoration produced a fresh real pong by 147 seconds (about 4 seconds later).
+  The other subscriber, shared bridge and all prior event-log bytes were unchanged.
+- Diagnostic configuration was removed and the test bot returned to the direct
+  route. Both bots had verified pongs and `transport_healthy=true`,
+  `delivery_healthy=true` after cleanup.
+- The scheduled task retained `PT1M`, overlap protection and exit reporting.
+  A 55-second visible-console observation spanning recovery found zero new
+  visible terminal windows; the actual task returned exit code 0.
+- Real bound-chat message acceptance also passed after cleanup: one matching
+  user marker appeared in the originally bound Codex rollout, the assistant's
+  reply followed that marker, the final card checkpoint recorded delivery, and
+  the inbox reached `done`. Acceptance-to-completion time was 22.7 seconds.
+  The user independently confirmed receiving the expected reply in Feishu.
+
+Private raw evidence remains under the installed runtime's `state/`; only this
+sanitized summary and test source are published. Credential scans used known
+local values and pattern checks with positive/negative controls; no matches were
+found in the staged publish scope.
