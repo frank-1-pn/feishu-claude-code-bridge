@@ -1,5 +1,26 @@
 # feishu-claude-code-bridge
 
+## Current Codex runtime instructions
+
+The Windows Codex bridge uses the existing Feishu daemon and durable inbox.
+Its maintained instruction bundle is under [`codex-config/`](codex-config/):
+
+- [`AGENTS.md`](codex-config/AGENTS.md): global behavior and Feishu routing.
+- [`feishu-bot-runtime`](codex-config/skills/feishu-bot-runtime/SKILL.md): binding lookup, recovery, and delivery checks.
+- [Interaction and delivery](codex-config/skills/feishu-bot-runtime/references/interaction-and-delivery.md): reply cards, buttons, forms, progress, reports, and attachments.
+
+Merge the global instructions into the active Codex home `AGENTS.md` and install
+the skill directory under that home's `skills/`. Preserve unrelated instructions.
+This bundle contains documentation only: credentials, live bindings, session IDs,
+and private message state stay on the host. Read the [UX implementation](docs/feishu-ux-implementation.md)
+for implementation and acceptance evidence. Documentation updates do not require
+a subscriber restart or a new subscription.
+
+The Claude Code setup below describes the original integration; do not apply its
+Monitor or Claude PID-binding workflow to the Codex bridge.
+
+## Original Claude Code integration
+
 Personal-use bridge between Feishu (Lark) chats and a long-running
 Claude Code session on Windows. Lets the operator drive a desktop
 Claude Code instance from their phone — receive messages, run quick
