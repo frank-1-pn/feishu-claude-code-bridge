@@ -63,6 +63,17 @@ export class DurableInbox {
     try {
       // Preserve image/text context order while transient preparation retries.
       j.prepared ??= await this.io.prepare(j.event);
+      // Native voice confirmation is a local user interaction. No unconfirmed
+      // transcript reaches the model; its handler resumes this same durable job.
+      if(j.prepared.bridgeDisposition==='waiting_input') {
+        const candidate={...j,status:'waiting_input',waitingSince:this.now()};
+        this.save(candidate);Object.assign(j,candidate);return true;
+      }
+      if(j.prepared.bridgeDisposition==='handled') {
+        const candidate={...j,status:'done',completedAt:this.now(),localReply:true,replyKey:digest(`native-local:${j.id}`)};
+        atomicJson(path.join(this.dir,`sent-${candidate.replyKey}.json`),{sentAt:this.now(),local:true});
+        this.save(candidate);Object.assign(j,candidate);return true;
+      }
       const target = await this.io.target();
       if (!target) { this.save(j); return false; }
       j.rollout = target.rollout; j.cursor = fs.statSync(j.rollout).size;
@@ -151,7 +162,7 @@ export class DurableInbox {
     for (const j of this.jobs.values()) {
       if (!j.pendingProgress) continue;
       try {
-        await this.io.progress?.(j.pendingProgress.text, j.pendingProgress.key);
+        await this.io.progress?.(j.pendingProgress.text, j.pendingProgress.key, {jobId:j.id,job:j});
         delete j.pendingProgress; this.save(j);
       } catch { /* Saved snapshot is retried after restart. */ }
     }
@@ -161,7 +172,7 @@ export class DurableInbox {
       if (j.notice) {
         j.noticeRetry ??= {};
         if (!j.noticeRetry.blocked && (j.noticeRetry.retryAt ?? 0) <= this.now()) {
-          try { await this.io.send(j.notice, digest(`notice:${j.id}:${j.notice}`)); delete j.notice; delete j.noticeRetry; }
+          try { await this.io.send(j.notice, digest(`notice:${j.id}:${j.notice}`),{jobId:j.id,job:j}); delete j.notice; delete j.noticeRetry; }
           catch (error) { recordFailure(j.noticeRetry, error, this.now()); }
           this.save(j);
         }
@@ -188,7 +199,7 @@ export class DurableInbox {
     const count = (s) => all.filter(j => s.includes(j.status)).length;
     return { queued_count: count(['queued']), awaiting_delivery_count: count(['submitted']),
       awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
-      failed_count: count(['failed']), completed_count: count(['done']),
+      failed_count: count(['failed']), completed_count: count(['done']), waiting_input_count: count(['waiting_input']),
       watch_error_count: all.filter(j=>j.error==='rollout_read_failed').length,
       outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
       oldest_queued_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'queued').map(j => (this.now()-j.acceptedAt)/1000))),

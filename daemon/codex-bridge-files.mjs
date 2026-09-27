@@ -3,6 +3,7 @@ import path from 'node:path';
 import { digest } from './codex-bridge-inbox.mjs';
 import { atomicWriteJson } from './codex-bridge-storage.mjs';
 import { recordFailure } from './codex-bridge-retry.mjs';
+import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 
 const permanent = code => Object.assign(new Error(code), { code, permanent: true });
 export function within(root, file) {
@@ -18,6 +19,7 @@ export function authorizedFileJob(inboxRoot, binding, jobId, replyKey) {
   if (job.id !== jobId || !binding.chat_id || !binding.allowed_sender_id
       || job.event?.chat_id !== binding.chat_id || job.event?.sender_id !== binding.allowed_sender_id
       || (replyKey !== undefined && (!/^[a-f0-9]{64}$/.test(replyKey) || job.replyKey !== replyKey))) throw permanent('attachment_binding_mismatch');
+  if(!isBoundJob(binding,job))throw permanent('attachment_binding_changed');
   return job;
 }
 
@@ -33,7 +35,8 @@ function enqueueSnapshot({ root, binding, jobId, mode, name, bytes, preview, key
   const manifest = path.join(dir, 'request.json');
   if (fs.existsSync(manifest)) {
     const s = JSON.parse(fs.readFileSync(manifest));
-    if (s.hash !== digest(bytes) || (s.origin && !matchesOrigin(s.origin, binding))) throw permanent('attachment_snapshot_changed');
+    if (s.hash !== digest(bytes) || (s.origin && !matchesOrigin(s.origin, binding))
+        ||(s.deliveryVersion===2&&s.bindingScope!==digest(JSON.stringify(bindingSnapshot(binding))))) throw permanent('attachment_snapshot_changed');
     return { key, status: s.status };
   }
   const payloadDir = path.join(dir, 'payload'); fs.mkdirSync(payloadDir, { recursive: true });
@@ -49,6 +52,7 @@ function enqueueSnapshot({ root, binding, jobId, mode, name, bytes, preview, key
   if (preview) { coverName = `cover-${digest(preview.bytes).slice(0,8)}-${path.basename(preview.real)}`; snapshot(coverName, preview.bytes); }
   atomicWriteJson(manifest, { key, jobId, mode, name, coverName, hash: digest(bytes),
     coverHash: preview ? digest(preview.bytes) : null, bytes: bytes.length, origin: originFor(binding),
+    deliveryVersion:2,bindingScope:digest(JSON.stringify(bindingSnapshot(binding))),
     ...(reportId ? { generatedReport: reportId } : {}), status: 'queued', createdAt: Date.now() });
   return { key, status: 'queued' };
 }
@@ -117,9 +121,9 @@ export function getReportDelivery({ root, binding, artifacts }) {
 }
 
 export class FileOutbox {
-  constructor(root, binding, request, { now = Date.now, notify } = {}) {
+  constructor(root, binding, request, { now = Date.now, notify, getRoute } = {}) {
     this.root = path.join(root, binding.bot); this.binding = binding; this.request = request; this.now = now;
-    this.notify = notify;
+    this.notify = notify;this.getRoute=getRoute;
     fs.mkdirSync(this.root, { recursive: true });
   }
   records() {
@@ -147,8 +151,8 @@ export class FileOutbox {
         s.noticeRetry ??= {};
         if(!s.noticeRetry.blocked && (s.noticeRetry.retryAt??0)<=this.now()) {
           try {
-            await this.notify(s.generatedReport ? '完整报告附件发送未完成，原文已保留。请检查 bridge 文件队列和飞书权限；文字答复不代表附件已送达。' : '文件发送失败，附件已保留。请检查 bridge 文件队列和飞书权限；文字答复不代表附件已送达。',
-              s.generatedReport ? `report-failed:${s.generatedReport}` : `file-failed:${s.key}`);
+            await this.notify(s.sendIntent?.uncertain ? '附件送达状态尚未确认，原文件和发送记录已保留；请先核验原聊天，不要重复提交附件。' : s.generatedReport ? '完整报告附件发送未完成，原文已保留。请检查 bridge 文件队列和飞书权限；文字答复不代表附件已送达。' : '文件发送失败，附件已保留。请检查 bridge 文件队列和飞书权限；文字答复不代表附件已送达。',
+              s.generatedReport ? `report-failed:${s.generatedReport}` : `file-failed:${s.key}`,s.jobId);
             s.noticeSent=true;
             if (noticeFile) atomicWriteJson(noticeFile, { sentAt: this.now() });
           }
@@ -159,6 +163,8 @@ export class FileOutbox {
       if (s.status !== 'queued' || (s.retryAt ?? 0) > this.now()) continue;
       try {
         if ((s.origin && !matchesOrigin(s.origin, this.binding)) || (s.generatedReport && !s.origin)) throw permanent('attachment_binding_mismatch');
+        const scope=digest(JSON.stringify(bindingSnapshot(this.binding)));
+        if(s.deliveryVersion===2&&s.bindingScope!==scope)throw permanent('attachment_binding_mismatch');
         const dir = path.join(path.dirname(file),'payload'), source = path.resolve(dir, s.name);
         if (!within(dir, fs.realpathSync(source)) || digest(fs.readFileSync(source)) !== s.hash) throw permanent('attachment_snapshot_changed');
         const args = ['im', '+messages-send', '--chat-id', this.binding.chat_id, `--${s.mode}`, `./${s.name}`,
@@ -168,10 +174,69 @@ export class FileOutbox {
           if (!within(dir, preview) || digest(fs.readFileSync(preview)) !== s.coverHash) throw permanent('attachment_cover_changed');
           args.push('--video-cover', `./${s.coverName}`);
         }
-        await this.request(this.binding, args, dir);
+        if(this.getRoute)await this.sendRouted(file,s,args,dir,scope);
+        else {
+          // An optional-routing upgrade later must retain the endpoint of a
+          // chat send that may have succeeded before the response was lost.
+          s.legacySendStartedAt??=this.now();atomicWriteJson(file,s);
+          await this.request(this.binding, args, dir);
+        }
         s.status = 'done'; s.completedAt = this.now(); delete s.error;
       } catch (error) { recordFailure(s, error, this.now()); if (s.blocked) s.status = 'blocked'; }
       atomicWriteJson(file, s);
     }
+  }
+  async sendRouted(file,s,legacyArgs,dir,scope){
+    const validRoute=route=>route?.version===1&&route.scope===scope&&route.chatId===this.binding.chat_id
+      &&['chat','quote','thread'].includes(route.mode)&&(route.mode==='chat'||(/^om_[A-Za-z0-9_-]+$/.test(route.messageId??'')&&!route.messageId.startsWith('om_cb_')));
+    const payloadHash=digest(JSON.stringify([s.key,s.mode,s.name,s.hash,s.coverName??null,s.coverHash??null]));
+    if(!s.sendIntent){
+      // Every pre-upgrade request keeps its original chat endpoint and UUID.
+      // Its old format did not checkpoint first IO; creation time is the only
+      // conservative bound for an unknown request that may already have sent.
+      const legacy=s.deliveryVersion!==2||s.legacySendStartedAt!==undefined;
+      const route=legacy?{version:1,scope,chatId:this.binding.chat_id,mode:'chat'}:await this.getRoute(s.jobId);
+      if(!validRoute(route))throw permanent('attachment_reply_route_invalid');
+      s.sendIntent={schema:1,scope,payloadHash,route,uuid:s.key.slice(0,32),legacy,
+        uncertain:legacy,uncertainSince:legacy?(s.legacySendStartedAt??s.createdAt):undefined};
+      atomicWriteJson(file,s);
+    }
+    const intent=s.sendIntent;
+    if(intent.schema!==1||intent.scope!==scope||intent.payloadHash!==payloadHash||intent.uuid!==s.key.slice(0,32)||!validRoute(intent.route)
+      ||(intent.uncertain&&(!Number.isFinite(intent.uncertainSince)||intent.uncertainSince>this.now())))throw permanent('attachment_send_intent_invalid');
+    if(intent.sent){if(!/^om_[A-Za-z0-9_-]+$/.test(intent.messageId??''))throw permanent('attachment_send_intent_invalid');return;}
+    for(let step=0;step<3;step++){
+      if(intent.uncertain&&this.now()-intent.uncertainSince>=55*60*1000){
+        throw Object.assign(permanent('attachment_delivery_uncertain_expired'),{deliveryUncertain:true});
+      }
+      const route=intent.route;
+      const args=route.mode==='chat'?[...legacyArgs]:['im','+messages-reply','--message-id',route.messageId,
+        ...(route.mode==='thread'?['--reply-in-thread']:[]),...legacyArgs.slice(4)];
+      const wasUncertain=Boolean(intent.uncertain);
+      intent.uncertain=true;intent.uncertainSince??=this.now();intent.lastAttemptAt=this.now();atomicWriteJson(file,s);
+      try{
+        const result=await this.request(this.binding,args,dir);
+        if(!/^om_[A-Za-z0-9_-]+$/.test(result?.message_id??'')||(result.chat_id&&result.chat_id!==this.binding.chat_id))
+          throw Object.assign(Error('attachment_ack_invalid'),{code:'attachment_ack_invalid'});
+        intent.sent=true;intent.messageId=result.message_id;intent.uncertain=false;atomicWriteJson(file,s);return;
+      }catch(error){
+        const code=String(error.apiCode??error.code??'');
+        if(!wasUncertain&&['230011','230019'].includes(code)&&route.mode!=='chat'){
+          intent.route={...route,mode:'chat'};intent.fallback='source_unavailable';intent.uncertain=false;delete intent.uncertainSince;
+          atomicWriteJson(file,s);continue;
+        }
+        if(!wasUncertain&&['230071','230072'].includes(code)&&route.mode==='thread'){
+          intent.route={...route,mode:'quote'};intent.fallback='thread_unsupported';intent.uncertain=false;delete intent.uncertainSince;
+          atomicWriteJson(file,s);continue;
+        }
+        if(!wasUncertain&&(code==='230020'||['permission','validation','authentication'].includes(error.type)
+          ||['230001','230002','230006','230013','230017','230018','230022','230025','230027','230028','230035','230038','230050','230054','230055','230075','230111','232009','99991672','99991668'].includes(code))){
+          intent.uncertain=false;delete intent.uncertainSince;
+          if(code!=='230020')error.permanent=true;
+        }
+        error.deliveryUncertain=Boolean(intent.uncertain);atomicWriteJson(file,s);throw error;
+      }
+    }
+    throw permanent('attachment_reply_fallback_exhausted');
   }
 }

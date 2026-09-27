@@ -3,10 +3,12 @@ import { parseReplyUx, isBoundJob } from './codex-bridge-ux.mjs';
 import { prepareReplyReport } from './codex-bridge-report.mjs';
 import { getReportDelivery, authorizedFileJob } from './codex-bridge-files.mjs';
 import { buildActionElements } from './codex-bridge-action-ui.mjs';
+import { replyRouteNotice } from './codex-bridge-reply-routing.mjs';
 
 // One integration owner calls this outside the outbound serial lane: file
 // sends use that same lane and must finish before the final-card operation.
-export function createReplyDelivery({ binding, actions, outbound, files, reportOptions, log=()=>{} }) {
+export function createReplyDelivery({ binding, actions, outbound, files, reportOptions, cloudDocs, nativeInteractions, getRoute, log=()=>{} }) {
+  const unavailable=(name,jobId)=>{try{log(name,{bot:binding.bot,jobId});}catch{/* Feedback must not block the answer. */}};
   return async (value, replyKey, streamKeys=[], context={}) => {
     if(context.jobId){
       const origin=authorizedFileJob(reportOptions.inboxRoot,binding,context.jobId,replyKey);
@@ -15,6 +17,16 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
     const clean=sanitizeFeishuReply(value).trim();
     const ux=parseReplyUx(clean);
     const presentation={status:ux.status};
+    if(getRoute){
+      try{
+        const route=await getRoute(context);
+        if(route){
+          presentation.replyRoute=route;
+          const notice=replyRouteNotice(route);
+          if(notice)presentation.replyNotice=notice;
+        }
+      }catch{unavailable('reply_route_unavailable',context.jobId);}
+    }
     if (ux.form) {
       presentation.fallbackText=ux.text+'\n\n请一次回复以下条件：\n'+ux.form.fields.map(f=>
         `- ${f.label}${f.required?'（必填）':'（可选）'}${f.options ? `：${f.options.map(o=>o.label).join('／')}` : ''}`).join('\n');
@@ -23,6 +35,10 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
       try {
         const report=prepareReplyReport({...reportOptions,binding,jobId:context.jobId,replyKey,text:clean});
         if(report.generated){
+          if(cloudDocs){
+            try{cloudDocs.enqueue({jobId:context.jobId,replyKey,text:clean});}
+            catch{unavailable('reply_cloud_doc_unavailable',context.jobId);}
+          }
           await files.flush();
           const delivery=getReportDelivery({root:reportOptions.fileOutboxRoot,binding,artifacts:report.artifacts});
           presentation.report={fileName:report.artifacts.find(a=>a.name.endsWith('.html'))?.name??'report.html',
@@ -30,7 +46,13 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
         }
       } catch {
         // Keep all text deliverable if report rendering/upload is unavailable.
-        log('reply_report_unavailable',{bot:binding.bot,jobId:context.jobId});
+        unavailable('reply_report_unavailable',context.jobId);
+      }
+      if(cloudDocs){
+        try{
+          const cloudDoc=cloudDocs.result(replyKey);
+          if(cloudDoc?.status==='ready' && typeof cloudDoc.url==='string')presentation.cloudDoc=cloudDoc;
+        }catch{unavailable('reply_cloud_doc_unavailable',context.jobId);}
       }
     }
     if(actions && context.jobId && binding.interactions_enabled!==false){
@@ -39,7 +61,18 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
           chatId:binding.chat_id,allowedSenderId:binding.allowed_sender_id,answer:ux.text,mode:ux.status,form:ux.form});
         const elements=buildActionElements(descriptor,{includeForm:ux.status==='waiting'});
         presentation.actionContext=descriptor.contextId;presentation.interactions=elements;
-      } catch { log('reply_actions_unavailable',{bot:binding.bot,jobId:context.jobId}); }
+      } catch { unavailable('reply_actions_unavailable',context.jobId); }
+    }
+    if(nativeInteractions && context.jobId && ux.status==='complete' && binding.interactions_enabled!==false){
+      try{
+        const native=await nativeInteractions.taskButton({jobId:context.jobId,replyKey,text:ux.text});
+        if(native){
+          if(typeof native.contextId!=='string' || !native.contextId || !native.element || typeof native.element!=='object')
+            throw Error('invalid_native_task_button');
+          presentation.nativeContext=native.contextId;
+          presentation.interactions=[...(presentation.interactions??[]),native.element];
+        }
+      }catch{unavailable('reply_native_actions_unavailable',context.jobId);}
     }
     await outbound.final(ux.form && !presentation.actionContext ? presentation.fallbackText : ux.text,replyKey,streamKeys,presentation);
   };

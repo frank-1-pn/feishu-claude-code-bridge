@@ -23,6 +23,10 @@ scoped network-fault acceptance.
 [Message reaction feedback](docs/feishu-message-reactions.md) documents the
 native received/processing/delivered indicators, recovery and permissions.
 
+[Native interaction integration](docs/feishu-native-integration.md) covers quoted
+replies and topics, private cloud reports, confirmed tasks, optional voice input,
+and faster public progress cards, including current validation limits.
+
 The Claude Code setup below describes the original integration; do not apply its
 Monitor or Claude PID-binding workflow to the Codex bridge.
 

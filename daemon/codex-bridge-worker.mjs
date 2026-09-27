@@ -40,6 +40,10 @@ import { DurableOutbound } from './codex-bridge-outbound.mjs';
 import { FileOutbox } from './codex-bridge-files.mjs';
 import { ActionStore } from './codex-bridge-actions.mjs';
 import { createReplyDelivery } from './codex-bridge-delivery.mjs';
+import { DurableReplyRouter, selectReplyRoute } from './codex-bridge-reply-routing.mjs';
+import { NativeInteractions } from './codex-bridge-native-runtime.mjs';
+import { CloudDocOutbox } from './codex-bridge-cloud-docs.mjs';
+import { hydrateNativeContext } from './codex-bridge-native-context.mjs';
 import { UX_PROMPT, bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -54,7 +58,7 @@ const RECEIPTS_PATH = path.join(STATE_DIR, 'receipt-events.json');
 const PROGRESS_PATH = path.join(STATE_DIR, 'progress-events.json');
 const RECEIPT_TEXT = '✅ 已收到，正在交给当前 Codex 会话处理；关键阶段会自动同步进度。若会话正忙，消息会保留并自动继续。';
 const EMPTY_REPLY_TEXT = 'Codex 本次只返回了内部引用元数据，没有可发送的正文，请重试。';
-const PROGRESS_MIN_INTERVAL_MS = 10000;
+const PROGRESS_MIN_INTERVAL_MS = 2000;
 const PROGRESS_MAX_MESSAGES = 8;
 const PROGRESS_MAX_CHARACTERS = 1800;
 const ORCA_PTY_RPC_PATH = path.join(DAEMON_DIR, 'orca-pty-rpc.mjs');
@@ -1137,17 +1141,45 @@ async function durableBotLoops(binding) {
       resolveAppId:()=>resolveLarkAppId(LARK_ENTRY,binding,{cwd:DAEMON_DIR,children:activeChildren})});
   } catch {log('reaction_state_unavailable',{bot:binding.bot});}
   const actions=new ActionStore({root:path.join(DAEMON_DIR,'state','actions-v1'),bot:binding.bot});
+  const contextRequest=createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:15000});
+  let inbox,nativeInteractions;
+  const getRoute=(context={})=>{
+    const allJobs=[...(inbox?.jobs.values()??[])];
+    const jobId=typeof context==='string'?context:context.jobId;
+    const jobs=context.jobs??allJobs.filter(job=>job.id===jobId);
+    return selectReplyRoute(binding,jobs,{allJobs});
+  };
+  const router=new DurableReplyRouter({root:path.join(DAEMON_DIR,'state','native-replies-v1'),binding,request:lark});
   const outbound = new DurableOutbound(path.join(DAEMON_DIR, 'state', 'outbound-v3'), binding, lark, {
-    presentationEnabled:true,
-    onCardMessage:(messageId,presentation)=>{if(presentation?.actionContext) actions.bindMessage(presentation.actionContext,messageId);},
+    presentationEnabled:true,minIntervalMs:2000,sendMessage:args=>router.send(args),
+    onCardMessage:(messageId,presentation)=>{
+      if(presentation?.actionContext)actions.bindMessage(presentation.actionContext,messageId);
+      if(presentation?.nativeContext)nativeInteractions.bindMessage(presentation.nativeContext,messageId);
+    },
   });
+  nativeInteractions=new NativeInteractions({root:path.join(DAEMON_DIR,'state','native-interactions-v1'),binding,
+    downloadRoot:path.join(os.homedir(),'lark-downloads','codex-inbox'),request:lark,children:activeChildren,
+    taskRequest:createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:15000}),
+    voiceRequest:createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:45000}),
+    getInbox:()=>inbox,getRoute,outbound});
+  const cloudDocs=new CloudDocOutbox({root:path.join(DAEMON_DIR,'state','cloud-docs-v1'),inboxRoot:INBOX_ROOT,binding,
+    request:createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:45000}),
+    resolveAppId:()=>resolveLarkAppId(LARK_ENTRY,binding,{cwd:DAEMON_DIR,children:activeChildren}),
+    notify:async(text,key,record)=>{
+      if(!await outbound.attachCloudDoc(record.replyKey,record))await outbound.text(text,key,getRoute(record.jobId));
+    }});
   const files = new FileOutbox(path.join(DAEMON_DIR, 'state', 'file-outbox'), binding,
-    (...args) => outbound.serial(() => lark(...args)), {notify:(text,key)=>outbound.text(text,key)});
-  const final=createReplyDelivery({binding,actions,outbound,files,log,reportOptions:{
+    (...args) => outbound.serial(() => lark(...args)), {getRoute,notify:(text,key,jobId)=>outbound.text(text,key,getRoute(jobId))});
+  const final=createReplyDelivery({binding,actions,outbound,files,cloudDocs,nativeInteractions,getRoute,log,reportOptions:{
     reportRoot:path.join(DAEMON_DIR,'state','reports-v1'),fileOutboxRoot:path.join(DAEMON_DIR,'state','file-outbox'),inboxRoot:INBOX_ROOT,
   }});
-  const inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
-    prepare: event => prepareInbound(binding,event,{ download:lark, downloadRoot:path.join(os.homedir(),'lark-downloads','codex-inbox'), writeText:atomicWriteText }),
+  inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
+    prepare: async event => {
+      const hydrated=await hydrateNativeContext(binding,event,contextRequest);
+      const job=inbox.jobs.get(event.message_id??event.id);
+      const candidate={...job,event:hydrated};inbox.save(candidate);Object.assign(job,candidate);
+      return nativeInteractions.prepare(hydrated);
+    },
     target: async () => {
       const pty = await resolveActivePty(binding);
       return { pty, rollout: findRolloutPath(binding.codex_thread_id) };
@@ -1163,9 +1195,10 @@ async function durableBotLoops(binding) {
         finally { fs.rmSync(output,{force:true}); }
       }
     },
-    send: (text,key) => outbound.text(text,key),
+    send: (text,key,context) => outbound.text(text,key,getRoute(context)),
     final,
-    progress: (text,key) => outbound.progress(text,key),
+    progress: (text,key,context) => outbound.progress(text,key,getRoute({jobId:context?.jobId,
+      jobs:[...inbox.jobs.values()].filter(job=>job.streamKey===key)})),
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
   // Private pending jobs are tied to the originating mapping. Rebinding a bot
@@ -1196,9 +1229,10 @@ async function durableBotLoops(binding) {
           && (event.type==='card.action.trigger' || event.header?.event_type==='card.action.trigger')) {
         // The selected NDJSON source fixes authenticatedBot. Never trust a bot,
         // thread, prompt or recipient supplied in the callback value itself.
-        const accepted=actions.acceptCallback(event,{binding,authenticatedBot:binding.bot});
+        const isNative=(event.event??event).action?.value?.bridge_native==='v1';
+        const accepted=isNative?nativeInteractions.acceptCallback(event):actions.acceptCallback(event,{binding,authenticatedBot:binding.bot});
         if(accepted.reason==='storage_unavailable') throw new Error('action_storage_unavailable');
-        if(accepted.accepted) actionDrain=actions.drain({binding,inbox});
+        if(accepted.accepted){if(!isNative)actionDrain=actions.drain({binding,inbox});}
         else {
           log('card_action_rejected',{bot:binding.bot,reason:accepted.reason??'invalid'});
           const payload=event.event??event;
@@ -1235,8 +1269,10 @@ async function durableBotLoops(binding) {
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
     const fileStats=files.stats();
     const actionStats=actions.stats();
+    const nativeStats=nativeInteractions.actions.stats();
     const reactionStats=reactions?.stats()??{reaction_blocked_count:1,reaction_last_error:'state_unavailable'};
-    updateBotStatus(binding.bot,{...stats,...fileStats,...reactionStats,action_accepted_count:actionStats.accepted_count,
+    updateBotStatus(binding.bot,{...stats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
+      voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
       state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
@@ -1244,6 +1280,7 @@ async function durableBotLoops(binding) {
   };
   await Promise.all([loop('intake',intake),loop('dispatch',()=>inbox.dispatchOne()),
     loop('actions',()=>{actionDrain=actions.drain({binding,inbox});}),
+    loop('native-actions',()=>nativeInteractions.drain(),1000),loop('cloud-docs',()=>cloudDocs.flush(),1000),
     loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000),
     loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000),
     loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),

@@ -60,6 +60,9 @@ health and does not cause the watchdog to restart a healthy connection.
   copies match the reviewed source.
 - Both bots report zero pending, blocked and failed feedback operations after
   startup; transport, delivery and feedback health checks pass.
-- Automatic reaction transitions on a new user message and client appearance
-  still await a real-message check. API preflight and healthy startup alone are
-  not an end-to-end acceptance claim.
+- A real Bot1 message was verified in the original bound Codex thread, followed
+  by a final answer and the durable reply-delivery checkpoint. Feishu's list API
+  confirms exactly one current-app `DONE` reaction, with no lingering processing
+  indicator. The user confirmed both receipt of the reply and the visible
+  completion emoji on the original message. Intermediate emoji transitions were
+  covered by tests, rather than captured during this client check.

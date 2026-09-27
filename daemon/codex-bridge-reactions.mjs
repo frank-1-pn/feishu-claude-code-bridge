@@ -16,6 +16,7 @@ export function reactionForJob(job,now=Date.now(),maxAgeMs=86400000) {
   // DONE means the reply outbox has committed delivery, not merely model output.
   if(job.status==='done')return 'DONE';
   if(job.status==='failed' || job.replyRetry?.blocked)return 'ERROR';
+  if(job.status==='waiting_input')return 'OneSecond';
   if(job.timeoutNotified || job.error==='rollout_read_failed')return 'OneSecond';
   if(job.markerSeen && ['delivered','reply_pending'].includes(job.status))return 'Typing';
   return ['queued','submitted','delivered','reply_pending'].includes(job.status)?'OnIt':null;

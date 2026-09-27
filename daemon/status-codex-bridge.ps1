@@ -131,6 +131,16 @@ if ($bindings -and $bindings.bindings) {
             action_accepted_count = if ($botState) { $botState.action_accepted_count } else { $null }
             action_pending_count = if ($botState) { $botState.action_pending_count } else { $null }
             action_blocked_count = if ($botState) { $botState.action_blocked_count } else { $null }
+            waiting_input_count = if ($botState) { $botState.waiting_input_count } else { $null }
+            native_reply_pending_count = if ($botState) { $botState.native_reply_pending_count } else { $null }
+            native_reply_blocked_count = if ($botState) { $botState.native_reply_blocked_count } else { $null }
+            native_action_pending_count = if ($botState) { $botState.native_action_pending_count } else { $null }
+            native_action_blocked_count = if ($botState) { $botState.native_action_blocked_count } else { $null }
+            cloud_doc_pending_count = if ($botState) { $botState.cloud_doc_pending_count } else { $null }
+            cloud_doc_failed_count = if ($botState) { $botState.cloud_doc_failed_count } else { $null }
+            cloud_doc_ready_count = if ($botState) { $botState.cloud_doc_ready_count } else { $null }
+            cloud_doc_last_error = if ($botState) { $botState.cloud_doc_last_error } else { $null }
+            voice_enabled = if ($botState) { $botState.voice_enabled } else { $false }
             reaction_pending_count = if ($botState) { $botState.reaction_pending_count } else { $null }
             reaction_blocked_count = if ($botState) { $botState.reaction_blocked_count } else { $null }
             reaction_error_count = if ($botState) { $botState.reaction_error_count } else { $null }
