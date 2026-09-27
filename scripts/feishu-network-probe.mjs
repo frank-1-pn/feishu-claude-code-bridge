@@ -23,7 +23,10 @@ export async function createFaultRelay({maxFaultMs=240000,allowTarget=(host,port
    stats.connections++;
    if(mode==='blackhole'){pair.tainted=true;client.on('data',d=>{stats.dropped_bytes+=d.length;});return;}
    const upstream=net.connect({host:match[1],port:Number(match[2])});pair.upstream=upstream;
-   upstream.on('error',cleanup);upstream.on('close',cleanup);
+   // During a blackhole, even the server's TCP close must remain invisible to
+   // the client. Otherwise the test exercises an ordinary close, not half-open.
+   const upstreamGone=()=>{if(mode==='blackhole'){pair.tainted=true;}else{cleanup();}};
+   upstream.on('error',upstreamGone);upstream.on('close',upstreamGone);
    const relay=(from,to,data)=>{if(mode==='blackhole'){pair.tainted=true;stats.dropped_bytes+=data.length;}else{stats.forwarded_bytes+=data.length;if(!to.write(data))from.pause();}};
    upstream.on('connect',()=>{
     client.write('HTTP/1.1 200 Connection Established\r\n\r\n');

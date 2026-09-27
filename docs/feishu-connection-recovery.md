@@ -83,3 +83,18 @@ Acceptance needs a positive pong, discarded real TCP bytes with the subscriber
 alive, expired heartbeat, automatic supervisor recovery, and a fresh pong after
 restoration. Then send a real bound-chat message and verify its original-thread
 marker and delivered final reply. Report unfinished client-side checks honestly.
+
+To run the live transport test against one idle bot after deploying the committed
+runtime (this intentionally interrupts that bot's network):
+
+```powershell
+node scripts/verify-feishu-network.mjs --runtime-dir <installed-daemon> --bot bot1
+```
+
+The runner records private evidence under runtime `state/`, leaves the actual
+scheduled watchdog to recover the subscriber, checks that other bot/bridge PIDs
+and the original event bytes remain unchanged, then removes the probe and
+verifies the normal direct connection. Its diagnostic route has a 45-second
+lease renewed by the runner; a crashed runner cannot leave a long-lived route.
+The fault relay also hides upstream closes while blackholing, so a server close
+cannot accidentally turn the half-open test into an ordinary TCP disconnect.
