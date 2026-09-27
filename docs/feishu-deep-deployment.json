@@ -1,0 +1,82 @@
+{
+    "schema":  1,
+    "checked_at":  "2026-09-27T14:00:23.3111709+08:00",
+    "runtime_revision":  "952d28335e03d659605dc20b23049246248a2caf",
+    "branch":  "feat/feishu-deep-opt-20260927",
+    "remote_ref_verified":  true,
+    "runtime_files":  14,
+    "runtime_hashes_match":  true,
+    "bindings_preserved":  true,
+    "transport_healthy":  true,
+    "delivery_healthy":  true,
+    "backup":  "C:\\Users\\ke\\.lark-cli\\daemon\\backups\\deep-opt-20260927-135441",
+    "tests":  {
+                  "duration_ms":  11120.8568,
+                  "skipped":  0,
+                  "source":  "git -c core.autocrlf=false archive",
+                  "failed":  0,
+                  "passed":  57
+              },
+    "bots":  [
+                 {
+                     "outbound_blocked":  0,
+                     "subscriber_pid_preserved":  true,
+                     "watch_errors":  0,
+                     "awaiting_reply":  0,
+                     "file_pending":  0,
+                     "rollout_watch_advanced_jobs":  0,
+                     "failed":  0,
+                     "pending_before":  0,
+                     "bot":  "bot1",
+                     "preexisting_jobs":  2,
+                     "jobs_lost":  0,
+                     "reply_pending":  0,
+                     "file_failed":  0,
+                     "awaiting_delivery":  0,
+                     "queued":  0
+                 },
+                 {
+                     "outbound_blocked":  0,
+                     "subscriber_pid_preserved":  true,
+                     "watch_errors":  0,
+                     "awaiting_reply":  1,
+                     "file_pending":  0,
+                     "rollout_watch_advanced_jobs":  1,
+                     "failed":  0,
+                     "pending_before":  1,
+                     "bot":  "coding",
+                     "preexisting_jobs":  11,
+                     "jobs_lost":  0,
+                     "reply_pending":  0,
+                     "file_failed":  0,
+                     "awaiting_delivery":  0,
+                     "queued":  0
+                 }
+             ],
+    "cardkit_api":  [
+                        {
+                            "bot":  "bot1",
+                            "checked_at":  "2026-09-27T05:55:33.300Z",
+                            "visible_message_sent":  false,
+                            "created":  true,
+                            "incremental_update":  true,
+                            "finalized":  true,
+                            "ok":  true
+                        },
+                        {
+                            "bot":  "coding",
+                            "checked_at":  "2026-09-27T05:55:34.979Z",
+                            "visible_message_sent":  false,
+                            "created":  true,
+                            "incremental_update":  true,
+                            "finalized":  true,
+                            "ok":  true
+                        }
+                    ],
+    "visible_card_rendering":  "not-yet-verified",
+    "new_inbound_model_ingress":  "not-yet-verified",
+    "real_file_roundtrip":  "not-run",
+    "forced_network_disconnect":  "not-run",
+    "streaming_level":  "public-commentary snapshots; not token streaming",
+    "half_open_socket_detection":  "not-verified"
+}
