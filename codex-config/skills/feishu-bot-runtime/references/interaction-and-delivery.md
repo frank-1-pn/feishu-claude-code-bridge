@@ -10,6 +10,14 @@
 - 公开进度按至少 10 秒节流更新卡片，当前是 commentary 快照，不是逐 token 增量。不把隐藏思考当作“过程”发送。
 - bridge 自动发送公开进度、最终卡片和异常提示；常规消息、按钮及表单受理成功后不发“已保存／正在投递”回执，agent 不手动补发。
 
+## 原消息的表情状态
+
+bridge 自动给真实入站消息添加原生表情：`OnIt` 表示已持久入队；确认原 thread 的 rollout 入站标记后切换为 `Typing`；最终回包送达并写入 checkpoint 后切换为 `DONE`。`DONE` 表示本轮回复已送达，不保证业务任务成功。失败或回包永久阻塞用 `ERROR`，等待超时或 rollout 读取异常用 `OneSecond`。按钮、表单的合成回调不添加表情；不批量补标历史已完成消息。
+
+反应状态保存在私有 `state/reactions-v1/<bot>/`，重启先对账不确定请求，只移除机器人自己创建的表情，不通过重复添加维持“心跳”。过期的活动状态会清理。表情失败不阻塞正文、不重复执行模型；权限不足时按 bot 暂停五分钟后重试。检查 `reaction_pending_count`、`reaction_blocked_count`、`reaction_error_count`、`reaction_last_error` 和独立的 `feedback_healthy`，不要把表情权限错误当成 WebSocket 故障。
+
+所需专用权限为 `im:message.reactions:read` 和 `im:message.reactions:write_only`，更宽的对应 IM 权限也可能满足。以实际 bot API 返回为准，不执行 user 登录来修复 bot 权限。私有 binding 的 `reaction_feedback=false` 可停止新增表情并清理活动标记；修改后使用原有 bridge 重载流程。
+
 ## 修改按钮
 
 完成卡片提供“再简短一点”“补充依据”“转表格”。回调由现有订阅转为持久 inbox 任务，携带原答案、原任务和原卡片上下文，送回原绑定 thread。

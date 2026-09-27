@@ -34,7 +34,8 @@ import { sanitizeFeishuReply } from './codex-bridge-sanitize.mjs';
 import { DurableInbox, digest } from './codex-bridge-inbox.mjs';
 import { prepareInbound } from './codex-bridge-media.mjs';
 import { atomicWriteJson, atomicWriteText, createStatusPublisher } from './codex-bridge-storage.mjs';
-import { createLarkTransport } from './codex-bridge-lark.mjs';
+import { createLarkTransport, resolveLarkAppId } from './codex-bridge-lark.mjs';
+import { DurableReactions } from './codex-bridge-reactions.mjs';
 import { DurableOutbound } from './codex-bridge-outbound.mjs';
 import { FileOutbox } from './codex-bridge-files.mjs';
 import { ActionStore } from './codex-bridge-actions.mjs';
@@ -1129,6 +1130,12 @@ async function sendDurableText(binding, text, key) {
 
 
 async function durableBotLoops(binding) {
+  let reactions;
+  try {
+    reactions=new DurableReactions({root:path.join(DAEMON_DIR,'state','reactions-v1'),binding,
+      request:createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:15000}),
+      resolveAppId:()=>resolveLarkAppId(LARK_ENTRY,binding,{cwd:DAEMON_DIR,children:activeChildren})});
+  } catch {log('reaction_state_unavailable',{bot:binding.bot});}
   const actions=new ActionStore({root:path.join(DAEMON_DIR,'state','actions-v1'),bot:binding.bot});
   const outbound = new DurableOutbound(path.join(DAEMON_DIR, 'state', 'outbound-v3'), binding, lark, {
     presentationEnabled:true,
@@ -1228,7 +1235,8 @@ async function durableBotLoops(binding) {
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
     const fileStats=files.stats();
     const actionStats=actions.stats();
-    updateBotStatus(binding.bot,{...stats,...fileStats,action_accepted_count:actionStats.accepted_count,
+    const reactionStats=reactions?.stats()??{reaction_blocked_count:1,reaction_last_error:'state_unavailable'};
+    updateBotStatus(binding.bot,{...stats,...fileStats,...reactionStats,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
       state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
@@ -1237,7 +1245,9 @@ async function durableBotLoops(binding) {
   await Promise.all([loop('intake',intake),loop('dispatch',()=>inbox.dispatchOne()),
     loop('actions',()=>{actionDrain=actions.drain({binding,inbox});}),
     loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000),
-    loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000)]);
+    loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000),
+    loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),
+    loop('reactions',()=>reactions?.flush(),1000)]);
 }
 
 let args;

@@ -20,6 +20,9 @@ See [connection heartbeat and recovery](docs/feishu-connection-recovery.md) for
 real ping/pong monitoring, bounded self-healing, invisible scheduled startup and
 scoped network-fault acceptance.
 
+[Message reaction feedback](docs/feishu-message-reactions.md) documents the
+native received/processing/delivered indicators, recovery and permissions.
+
 The Claude Code setup below describes the original integration; do not apply its
 Monitor or Claude PID-binding workflow to the Codex bridge.
 
