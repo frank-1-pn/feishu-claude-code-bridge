@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { atomicWriteJson } from './codex-bridge-storage.mjs';
 import { rolloutAssistantMessage, rolloutTaskCompletion } from './codex-bridge-progress.mjs';
+import { recordFailure } from './codex-bridge-retry.mjs';
 
 export const digest = (s) => createHash('sha256').update(s).digest('hex');
 export const atomicJson = atomicWriteJson;
@@ -55,10 +56,12 @@ export class DurableInbox {
     this.save(job); this.jobs.set(id, job); return job;
   }
   async dispatchOne() {
-    const j = [...this.jobs.values()].find(j => j.status === 'queued' && (j.retryAt ?? 0) <= this.now());
-    if (!j) return false;
+    if (this.dispatching) return false;
+    const j = [...this.jobs.values()].find(j => j.status === 'queued');
+    if (!j || (j.retryAt ?? 0) > this.now()) return false;
+    this.dispatching = true;
     try {
-      // Download errors do not block other messages; retries remain on disk.
+      // Preserve image/text context order while transient preparation retries.
       j.prepared ??= await this.io.prepare(j.event);
       const target = await this.io.target();
       if (!target) { this.save(j); return false; }
@@ -69,15 +72,17 @@ export class DurableInbox {
       catch { j.transportUncertain = true; this.save(j); }
       return true;
     } catch (error) {
-      j.attempts++; j.error = 'attachment_or_target_failed';
-      j.retryAt = this.now() + Math.min(60000, 1000 * 2 ** j.attempts);
-      if (j.attempts >= 3) {
+      recordFailure(j, error, this.now());
+      if (j.blocked) {
         j.status = 'failed';
         j.notice = '附件下载或会话定位失败，原消息已保留，未交给 Codex 执行。请检查 bridge 状态后重试。';
+      } else if(j.attempts>=3 && !j.preparationNotified) {
+        j.preparationNotified=true;
+        j.notice='消息已保存，附件下载或会话连接暂未恢复；系统会继续重试，后续消息按顺序保留。';
       }
       this.save(j); this.io.log?.('inbox_prepare_failed', { bot: this.bot, messageId: j.id, attempts: j.attempts });
       return true;
-    }
+    } finally { this.dispatching = false; }
   }
   scan(j) {
     const stat = fs.statSync(j.rollout, { throwIfNoEntry: false });
@@ -101,13 +106,19 @@ export class DurableInbox {
       let item; try { item = JSON.parse(b.subarray(pos, end).toString('utf8')); } catch { pos=end+1; continue; }
       pos = end+1;
       const p = item.payload;
+      if ((item.type === 'turn_context' || (item.type === 'event_msg' && p?.type === 'task_started')) && p?.turn_id) {
+        j.turnId = p.turn_id;
+      }
       if (item.type === 'response_item' && p?.type === 'message' && p.role === 'user'
           && JSON.stringify(p.content ?? []).includes(`[飞书消息｜${this.bot}｜${j.id}]`)) {
         j.markerSeen = true; j.status = 'delivered'; j.deliveredAt ??= this.now();
       }
       if (!j.markerSeen) continue;
       const message = rolloutAssistantMessage(item);
-      if (message?.phase === 'commentary') progress.push(message.text);
+      if (message?.phase === 'commentary') {
+        j.streamKey = digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}`);
+        j.pendingProgress = { text: message.text, key: j.streamKey };
+      }
       const completion = rolloutTaskCompletion(item);
       if (message?.phase === 'final_answer' || completion?.kind === 'final') {
         j.status = 'reply_pending'; j.reply = message?.text ?? completion.text;
@@ -125,35 +136,49 @@ export class DurableInbox {
     j.cursor += pos; this.save(j); return progress;
   }
   async watch() {
-    const progress = new Set();
     for (const j of this.jobs.values()) {
       if (!['submitted','delivered'].includes(j.status)) continue;
       try {
-        for (const t of this.scan(j)) progress.add(t);
+        this.scan(j);
         if(j.error==='rollout_read_failed'){delete j.error;this.save(j);}
       } catch { j.error = 'rollout_read_failed'; this.save(j); }
       // Timed-out jobs remain watched; late delivery/final may still arrive.
-      if (this.now() - j.submittedAt > this.timeoutMs && !j.timeoutNotified) {
+      if (['submitted','delivered'].includes(j.status) && this.now() - j.submittedAt > this.timeoutMs && !j.timeoutNotified) {
         j.notice = j.markerSeen ? '消息已送入 Codex，但答复等待超时；仍在跟踪，不会重复执行。' : '消息已保存，但尚未确认进入 Codex；仍在跟踪，请查看桌面会话状态。';
         j.timeoutNotified = true; this.save(j);
       }
     }
-    for (const text of [...progress].slice(-1)) await this.io.progress?.(text).catch(() => {});
+    for (const j of this.jobs.values()) {
+      if (!j.pendingProgress) continue;
+      try {
+        await this.io.progress?.(j.pendingProgress.text, j.pendingProgress.key);
+        delete j.pendingProgress; this.save(j);
+      } catch { /* Saved snapshot is retried after restart. */ }
+    }
   }
   async deliverReplies() {
     for (const j of this.jobs.values()) {
       if (j.notice) {
-        try { await this.io.send(j.notice, digest(`notice:${j.id}:${j.notice}`)); delete j.notice; this.save(j); } catch {}
+        j.noticeRetry ??= {};
+        if (!j.noticeRetry.blocked && (j.noticeRetry.retryAt ?? 0) <= this.now()) {
+          try { await this.io.send(j.notice, digest(`notice:${j.id}:${j.notice}`)); delete j.notice; delete j.noticeRetry; }
+          catch (error) { recordFailure(j.noticeRetry, error, this.now()); }
+          this.save(j);
+        }
       }
       if (j.status !== 'reply_pending') continue;
       const receipt = path.join(this.dir, `sent-${j.replyKey}.json`);
       if (!fs.existsSync(receipt)) {
+        const retryFile = path.join(this.dir, `reply-retry-${j.replyKey}.json`);
+        j.replyRetry = fs.existsSync(retryFile) ? JSON.parse(fs.readFileSync(retryFile, 'utf8')) : (j.replyRetry ?? {});
+        if (j.replyRetry.blocked || (j.replyRetry.retryAt ?? 0) > this.now()) continue;
         try {
-          await this.io.send(j.reply, j.replyKey);
+          const streamKeys = [...this.jobs.values()].filter(other => other.replyKey === j.replyKey).map(other => other.streamKey).filter(Boolean);
+          await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys);
           atomicJson(receipt, { sentAt: this.now() });
-        } catch { continue; }
+        } catch (error) { recordFailure(j.replyRetry, error, this.now()); atomicJson(retryFile,j.replyRetry); this.save(j); continue; }
       }
-      j.status = 'done'; j.completedAt = this.now(); delete j.reply;
+      j.status = 'done'; j.completedAt = this.now(); delete j.reply; delete j.replyRetry;
       this.save(j); this.io.log?.('inbox_reply_sent', { bot: this.bot, messageId: j.id });
     }
   }
@@ -164,6 +189,8 @@ export class DurableInbox {
       awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
       failed_count: count(['failed']), completed_count: count(['done']),
       watch_error_count: all.filter(j=>j.error==='rollout_read_failed').length,
+      outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
+      oldest_queued_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'queued').map(j => (this.now()-j.acceptedAt)/1000))),
       oldest_pending_seconds: Math.round(Math.max(0, ...all.filter(j => j.status !== 'done' && j.status !== 'failed').map(j => (this.now()-j.acceptedAt)/1000))),
       oldest_undelivered_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'submitted').map(j => (this.now()-j.submittedAt)/1000))),
       last_delivered_at: Math.max(0,...all.map(j=>j.deliveredAt??0)) || null };

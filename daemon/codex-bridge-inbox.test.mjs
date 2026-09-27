@@ -54,16 +54,17 @@ test('uncertain submission never blindly retries but accepts late marker',async 
   assert.equal(q.jobs.get('om_a').transportUncertain,true);f.append(marker('a'),answer());await q.watch();await q.deliverReplies();
   assert.equal(q.stats().completed_count,1);
 });
-test('failed attachment does not block subsequent text',async t=>{
-  const f=fixture(t,{prepare:async e=>{if(e.message_type==='image')throw Error('download');return e;}});
+test('permanent attachment failure is reported and unblocks subsequent text',async t=>{
+  const f=fixture(t,{prepare:async e=>{if(e.message_type==='image')throw Object.assign(Error('download'),{permanent:true});return e;}});
   f.q.enqueue(event('a','image'));f.q.enqueue(event('b'));await f.q.dispatchOne();await f.q.dispatchOne();
-  assert.deepEqual(f.injected,['om_b']);assert.equal(f.q.jobs.get('om_a').status,'queued');
+  assert.deepEqual(f.injected,['om_b']);assert.equal(f.q.jobs.get('om_a').status,'failed');
+  await f.q.deliverReplies();assert.match(f.sent[0].text,/未交给 Codex/);
 });
 test('failed sends retry same outbox key without re-running model',async t=>{
   let count=0;const keys=[];const f=fixture(t,{send:async(_,key)=>{keys.push(key);if(++count===1)throw Error('network');}});
   f.q.enqueue(event('a'));await f.q.dispatchOne();f.append(marker('a'),answer());await f.q.watch();
   await f.q.deliverReplies();assert.equal(f.q.stats().reply_pending_count,1);
-  const q=f.open();await q.deliverReplies();assert.equal(q.stats().completed_count,1);
+  const q=f.open();await q.deliverReplies();assert.equal(count,1);f.setNow(10000);await q.deliverReplies();assert.equal(q.stats().completed_count,1);
   assert.equal(keys[0],keys[1]);assert.equal(f.injected.length,1);
 });
 test('partial UTF-8 JSONL writes are re-read without losing bytes',async t=>{

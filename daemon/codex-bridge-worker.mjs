@@ -34,6 +34,10 @@ import { sanitizeFeishuReply } from './codex-bridge-sanitize.mjs';
 import { DurableInbox, digest } from './codex-bridge-inbox.mjs';
 import { prepareInbound } from './codex-bridge-media.mjs';
 import { atomicWriteJson, atomicWriteText, createStatusPublisher } from './codex-bridge-storage.mjs';
+import { createLarkTransport } from './codex-bridge-lark.mjs';
+import { DurableOutbound } from './codex-bridge-outbound.mjs';
+import { FileOutbox } from './codex-bridge-files.mjs';
+import { recordFailure } from './codex-bridge-retry.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -118,6 +122,7 @@ function loadAndValidateConfig(bindingsPath) {
   const entries = Object.entries(config.bindings);
   if (entries.length === 0) throw new Error('at least one binding is required');
   const threads = new Set();
+  const profiles = new Set();
   for (const [bot, binding] of entries) {
     if (!/^[A-Za-z0-9_-]+$/.test(bot)) throw new Error(`invalid bot name: ${bot}`);
     if (!UUID_RE.test(binding.codex_thread_id ?? '')) throw new Error(`${bot}: invalid codex_thread_id`);
@@ -129,6 +134,8 @@ function loadAndValidateConfig(bindingsPath) {
       throw new Error(`${bot}: invalid allowed_sender_id`);
     }
     if (typeof binding.profile !== 'string') throw new Error(`${bot}: profile must be a string`);
+    if (profiles.has(binding.profile)) throw new Error(`${bot}: one runtime binding per Lark profile is required`);
+    profiles.add(binding.profile);
     binding.bot = bot;
     binding.logPath = path.join(TEMP_DIR, `lark-${bot}-events.ndjson`);
     binding.offsetPath = path.join(TEMP_DIR, `lark-${bot}-codex.offset`);
@@ -326,6 +333,7 @@ function buildPrompt(binding, event) {
     + '已通过用户白名单。请在当前线程直接处理；阶段性工作进度可用 commentary 输出，bridge 会同步飞书，'
     + '同一 message_id 的重复投递只视作同一请求，不重复执行已完成的操作。'
     + '不要输出隐藏思考过程；最终答复只包含最终结果并由 bridge 回传。'
+    + `需要交付用户要求的本地文件时，用 node "${path.join(DAEMON_DIR, 'codex-bridge-send.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --file "绝对路径" 排入发送队列；只能提交用户要求的交付物，不能仅因链接提到了本地文件就上传。默认 --mode file；图片可用 image，音频 audio，视频 video 需 --cover 封面路径。文件限30MiB，图片10MiB，默认只允许当前工作目录。排队不等于送达。`
     + '若末尾为 ...(truncated)，先按 message_id 用现有 messages-mget 流程取全文。正文：';
   return content.includes('\n') || content.includes('\r')
     ? `${prefix}\n${content}`
@@ -1102,12 +1110,8 @@ const LARK_ENTRY = path.join(process.env.APPDATA ?? path.join(os.homedir(), 'App
 const INBOX_ROOT = path.join(DAEMON_DIR, 'state', 'codex-inbox-v2');
 
 async function lark(binding, args, cwd = DAEMON_DIR) {
-  const result = await runChildCapture(LARK_ENTRY, [
-    ...(binding.profile ? ['--profile', binding.profile] : []), ...args, '--as', 'bot'],
-  { cwd, timeoutMs: 120000, env: { ...process.env, LARK_CLI_NO_PROXY: '1' } });
-  const response = JSON.parse(result.stdout.trim().replace(/^\uFEFF/, ''));
-  if (response.ok !== true) throw new Error('lark_request_failed');
-  return response.data;
+  const result=await createLarkTransport(LARK_ENTRY, { children: activeChildren, cwd: DAEMON_DIR })(binding, args, cwd);
+  lastSuccessAt=new Date().toISOString();return result;
 }
 
 async function sendDurableText(binding, text, key) {
@@ -1122,7 +1126,9 @@ async function sendDurableText(binding, text, key) {
 
 
 async function durableBotLoops(binding) {
-  const progressState = { sentCount: 0, lastSentAt: 0 };
+  const outbound = new DurableOutbound(path.join(DAEMON_DIR, 'state', 'outbound-v3'), binding, lark);
+  const files = new FileOutbox(path.join(DAEMON_DIR, 'state', 'file-outbox'), binding,
+    (...args) => outbound.serial(() => lark(...args)), {notify:(text,key)=>outbound.text(text,key)});
   const inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
     prepare: event => prepareInbound(binding,event,{ download:lark, downloadRoot:path.join(os.homedir(),'lark-downloads','codex-inbox'), writeText:atomicWriteText }),
     target: async () => {
@@ -1140,14 +1146,9 @@ async function durableBotLoops(binding) {
         finally { fs.rmSync(output,{force:true}); }
       }
     },
-    send: (text,key) => sendDurableText(binding,text,key),
-    progress: async text => {
-      const key = digest(text);
-      if (progressGate(progressState,Date.now(),10000,1000).ok) {
-        await sendDurableText(binding,formatProgressReply(text,1800),`progress:${key}`);
-        progressState.sentCount++; progressState.lastSentAt=Date.now();
-      }
-    },
+    send: (text,key) => outbound.text(text,key),
+    final: (text,key,streams) => outbound.final(text,key,streams),
+    progress: (text,key) => outbound.progress(text,key),
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
   const loop = async (name,fn,delay=500) => {
@@ -1175,8 +1176,13 @@ async function durableBotLoops(binding) {
   const receipts = async () => {
     for(const j of inbox.jobs.values()) {
       if(j.receipted) continue;
-      if(!receiptIds.includes(j.id)) await sendDurableText(binding,'已保存，正在投递到当前 Codex 会话；图片和文件会下载后交给会话读取。',`receipt:${j.id}`);
-      j.receipted=true; inbox.save(j);
+      j.receiptRetry ??= {};
+      if (j.receiptRetry.blocked || (j.receiptRetry.retryAt ?? 0) > Date.now()) continue;
+      try {
+        if(!receiptIds.includes(j.id)) await outbound.text('已保存，正在投递到当前 Codex 会话；图片和文件会下载后交给会话读取。',`receipt:${j.id}`);
+        j.receipted=true;
+      } catch (error) { recordFailure(j.receiptRetry,error); }
+      inbox.save(j);
     }
     // This is an intake/receipt diagnostic cursor, not proof of model delivery.
     atomicWriteText(binding.receiptOffsetPath,String(readOffset(binding)??0));
@@ -1185,12 +1191,14 @@ async function durableBotLoops(binding) {
     await inbox.watch();
     const stats=inbox.stats();
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
-    updateBotStatus(binding.bot,{...stats,state:stats.failed_count||stats.watch_error_count?'degraded':busy?'processing':'idle',
+    const fileStats=files.stats();
+    updateBotStatus(binding.bot,{...stats,...fileStats,state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
-      delivery_stalled:stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120});
+      delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };
   await Promise.all([loop('intake',intake),loop('dispatch',()=>inbox.dispatchOne()),
-    loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000)]);
+    loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000),
+    loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000)]);
 }
 
 let args;

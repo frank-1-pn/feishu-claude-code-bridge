@@ -6,6 +6,7 @@ param()
 $ErrorActionPreference = 'Continue'
 
 $DaemonDir    = $PSScriptRoot
+. (Join-Path $DaemonDir 'subscriber-health.ps1')
 $WorkerPath   = Join-Path $DaemonDir 'codex-bridge-worker.mjs'
 $BindingsPath = Join-Path $DaemonDir 'codex-thread-bindings.json'
 $PidPath      = Join-Path $env:TEMP 'lark-codex-bridge.pid.json'
@@ -45,12 +46,7 @@ function Test-ExactBridgeProcess {
 
 function Test-Subscriber {
     param($Process, [string]$Profile)
-    if (-not $Process -or $Process.Name -ine 'node.exe') { return $false }
-    $cmd = [string]$Process.CommandLine
-    if ($cmd -notlike '*event*subscribe*') { return $false }
-    $profilePattern = '(?:^|\s)--profile\s+"?' + [regex]::Escape($Profile) + '"?(?:\s|$)'
-    if ($Profile) { return [regex]::IsMatch($cmd, $profilePattern, 'IgnoreCase') }
-    return ($cmd -notmatch '(?:^|\s)--profile(?:\s|=)')
+    return Test-LarkSubscriber $Process $Profile
 }
 
 function Read-Offset {
@@ -101,10 +97,13 @@ if ($bindings -and $bindings.bindings) {
             $stateProperty = $workerStatus.bot_states.PSObject.Properties[$bot]
             if ($stateProperty) { $botState = $stateProperty.Value }
         }
+        $socketSignal = Get-LarkSocketSignal (Join-Path $env:TEMP "lark-$bot-daemon.err.log")
         $botReports += [ordered]@{
             bot = $bot
             daemon_pid = if ($daemonPid) { $daemonPid } else { $null }
-            daemon_healthy = [bool](Test-Subscriber $daemonProcess ([string]$binding.profile))
+            daemon_healthy = [bool]((Test-Subscriber $daemonProcess ([string]$binding.profile)) -and $socketSignal -ne 'reconnect_exhausted')
+            socket_signal = $socketSignal
+            socket_verified = $false
             profile = [string]$binding.profile
             event_log_exists = [bool]$logItem
             event_log_bytes = if ($logItem) { [long]$logItem.Length } else { $null }
@@ -119,6 +118,9 @@ if ($bindings -and $bindings.bindings) {
             awaiting_reply_count = if ($botState) { $botState.awaiting_reply_count } else { $null }
             reply_pending_count = if ($botState) { $botState.reply_pending_count } else { $null }
             failed_count = if ($botState) { $botState.failed_count } else { $null }
+            outbound_blocked_count = if ($botState) { $botState.outbound_blocked_count } else { $null }
+            file_pending_count = if ($botState) { $botState.file_pending_count } else { $null }
+            file_failed_count = if ($botState) { $botState.file_failed_count } else { $null }
             watch_error_count = if ($botState) { $botState.watch_error_count } else { $null }
             completed_count = if ($botState) { $botState.completed_count } else { $null }
             oldest_pending_seconds = if ($botState) { $botState.oldest_pending_seconds } else { $null }
@@ -135,7 +137,8 @@ $healthy = [bool]($identityOk -and $heartbeatFresh -and $botsHealthy)
 $report = [ordered]@{
     healthy = $healthy
     transport_healthy = $healthy
-    delivery_healthy = [bool]($healthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 -or $_.watch_error_count -gt 0 }).Count -eq 0)
+    delivery_healthy = [bool]($healthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 -or $_.watch_error_count -gt 0 -or $_.outbound_blocked_count -gt 0 -or $_.file_failed_count -gt 0 }).Count -eq 0)
+    socket_health_scope = 'CLI has no structured ping/pong probe; exhausted reconnect is detected, silent half-open connections remain unverified'
     health_scope = 'healthy reports process/transport; delivery_healthy additionally checks queue failures and stalls; last_delivered_at is rollout evidence'
     checked_at = [DateTimeOffset]::UtcNow.ToString('o')
     bridge = [ordered]@{

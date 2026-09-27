@@ -1,0 +1,54 @@
+{
+    "checked_at":  "2026-09-27T12:30:26.0286164+08:00",
+    "baseline":  "f7b66132790ccd16e6a3935407e77f2447a535d1",
+    "test_command":  "node --test daemon/*.test.mjs",
+    "tests":  57,
+    "passed":  57,
+    "failed":  0,
+    "skipped":  0,
+    "duration_ms":  11285.4011,
+    "node_syntax":  "pass",
+    "powershell_syntax":  "pass",
+    "diff_check":  "pass",
+    "production_installed":  false,
+    "real_chat_media_test":  "not-run",
+    "token_streaming":  "unverified",
+    "half_open_socket":  "unverified",
+    "live_bot_api_probe":  "code=0, LARK_CLI_NO_PROXY=1",
+    "cli_version":  "1.0.39",
+    "cli_update_available":  "1.0.96",
+    "report_browser_qa":  {
+                              "checked_at":  "2026-09-27T04:29:25.224Z",
+                              "browser":  "Microsoft Edge headless",
+                              "results":  [
+                                              {
+                                                  "name":  "mobile",
+                                                  "title":  "飞书连接优化 · 评审与验收",
+                                                  "width":  390,
+                                                  "scrollWidth":  390,
+                                                  "height":  5251,
+                                                  "cards":  12,
+                                                  "hasCowAgent":  true,
+                                                  "hasTestEvidence":  true,
+                                                  "externalAssets":  0,
+                                                  "screenshot":  "C:\\Users\\ke\\AppData\\Local\\Temp\\feishu-report-qa-tUDcSa\\mobile.png"
+                                              },
+                                              {
+                                                  "name":  "desktop",
+                                                  "title":  "飞书连接优化 · 评审与验收",
+                                                  "width":  1280,
+                                                  "scrollWidth":  1265,
+                                                  "height":  3016,
+                                                  "cards":  12,
+                                                  "hasCowAgent":  true,
+                                                  "hasTestEvidence":  true,
+                                                  "externalAssets":  0,
+                                                  "screenshot":  "C:\\Users\\ke\\AppData\\Local\\Temp\\feishu-report-qa-tUDcSa\\desktop.png"
+                                              }
+                                          ],
+                              "console_errors":  0
+                          },
+    "live_config_validation":  "pass: bot1,coding; read-only --check-config",
+    "live_scripts_unchanged":  true,
+    "test_output":  "feishu-deep-test-output.txt"
+}

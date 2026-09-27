@@ -1,0 +1,80 @@
+{
+    "schema":  1,
+    "baseline":  "f7b66132790ccd16e6a3935407e77f2447a535d1",
+    "branch":  "feat/feishu-deep-opt-20260927",
+    "status":  "review-candidate-not-installed",
+    "captured_at":  "2026-09-27T13:50:04.6780183+08:00",
+    "previous_live_hashes_unchanged":  true,
+    "files":  [
+                  {
+                      "path":  "daemon/codex-bridge-cardkit.mjs",
+                      "candidate_sha256":  "29b1ef5314fad29f3c2385c3bbb9033af886833b3f96dc18250b1587fe6c134a",
+                      "live_sha256":  null
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-files.mjs",
+                      "candidate_sha256":  "13f03cc5d831edaed60d8530cc8443f2fec90fa16bf5f73af70022348ee53b4c",
+                      "live_sha256":  null
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-inbox.mjs",
+                      "candidate_sha256":  "7dff6bb2aea530471cc9bed74912f7b68588255ee2ec070225d3e48588e0e89e",
+                      "live_sha256":  "1f3056b5acfe531cf0b9233caf533627243a2a983d3779aab76a1fe250ae1621"
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-lark.mjs",
+                      "candidate_sha256":  "d5a8a07796424abe4bc77701a3c3dfbc6abacb1f77a598b65cd191baef1509f7",
+                      "live_sha256":  null
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-media.mjs",
+                      "candidate_sha256":  "b451bc0aca29c63b5c310ff79b3de2c5b20c9b688ad9548c6fe5f7fcc0509d44",
+                      "live_sha256":  "8206150f485a4a7770613c316a4bd82efb3c29a4cd7e7fff9f3bfc496d312e00"
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-outbound.mjs",
+                      "candidate_sha256":  "b3c41fb970bdd27e3b29670114d10356dfd7bfa7438a8c580f2a14581f4d249f",
+                      "live_sha256":  null
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-retry.mjs",
+                      "candidate_sha256":  "911f440e405230c65533afb27140a512fa65b7e0560b30d39d9e01f526a140b6",
+                      "live_sha256":  null
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-send.mjs",
+                      "candidate_sha256":  "45490b3869eaee9c6f02d40ac871a930b697429ce0f14b8b6343794b9cc84312",
+                      "live_sha256":  null
+                  },
+                  {
+                      "path":  "daemon/codex-bridge-worker.mjs",
+                      "candidate_sha256":  "d4fb1270f5606bca6e0000abe49e67eb2adf2593d0d97d1d17e7b6435077e799",
+                      "live_sha256":  "95736d0b9c4bf1ed530872e1139b3d24a619fdae64b71e7df6ac0f393a069ddf"
+                  },
+                  {
+                      "path":  "daemon/ensure-bot.ps1",
+                      "candidate_sha256":  "4dcc3bddd77a17c84d2c46f674a36d82e3993ccc36a7522c6325896c6d989230",
+                      "live_sha256":  "97f507d53af880b2eceb90b08459526a4fb8928dd28d378b9236be9f035b8be6"
+                  },
+                  {
+                      "path":  "daemon/start-bot.ps1",
+                      "candidate_sha256":  "bf7d72b239254e719427865cb45744f1ae8731b682b090c787bf57af5158ae94",
+                      "live_sha256":  "2a4b14c971eb714c5094491e17f02c2442f6045ea4a6495024ff882df97cbd51"
+                  },
+                  {
+                      "path":  "daemon/start-lark-append.mjs",
+                      "candidate_sha256":  "f5bbdb20c23810e4420c8c525d36686d25344b23de93eb9e05744bb9556170ae",
+                      "live_sha256":  null
+                  },
+                  {
+                      "path":  "daemon/status-codex-bridge.ps1",
+                      "candidate_sha256":  "acaa89e2817aed1edcec5b2c54713b2cf8b468fa771ed585bad299e7187a6834",
+                      "live_sha256":  "3668f586524ede94f849a6e558370eb7a6998b7e0883ad3e9ff1a0eb68a29a39"
+                  },
+                  {
+                      "path":  "daemon/subscriber-health.ps1",
+                      "candidate_sha256":  "532d477a1475d356bd82dd25ef1fd1c3ed72a70a5d3ac55ea4d878b84689a031",
+                      "live_sha256":  null
+                  }
+              ]
+}
