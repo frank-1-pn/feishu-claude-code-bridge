@@ -1,16 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { atomicWriteJson } from './codex-bridge-storage.mjs';
 import { rolloutAssistantMessage, rolloutTaskCompletion } from './codex-bridge-progress.mjs';
 
 export const digest = (s) => createHash('sha256').update(s).digest('hex');
-export function atomicJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${randomUUID()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 });
-  // On Windows rename replaces regular files; never delete the durable old state first.
-  fs.renameSync(tmp, file);
-}
+export const atomicJson = atomicWriteJson;
 
 export function normalizeEvent(event) {
   const type = event.message_type;

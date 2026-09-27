@@ -33,6 +33,7 @@ import {
 import { sanitizeFeishuReply } from './codex-bridge-sanitize.mjs';
 import { DurableInbox, digest } from './codex-bridge-inbox.mjs';
 import { prepareInbound } from './codex-bridge-media.mjs';
+import { atomicWriteJson, atomicWriteText, createStatusPublisher } from './codex-bridge-storage.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -72,32 +73,6 @@ function parseArgs(argv) {
 function readJson(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
   return JSON.parse(raw);
-}
-
-function atomicWriteJson(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  try {
-    fs.renameSync(tempPath, filePath);
-  } catch (error) {
-    if (error?.code !== 'EEXIST' && error?.code !== 'EPERM') throw error;
-    fs.rmSync(filePath, { force: true });
-    fs.renameSync(tempPath, filePath);
-  }
-}
-
-function atomicWriteText(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(tempPath, value, 'utf8');
-  try {
-    fs.renameSync(tempPath, filePath);
-  } catch (error) {
-    if (error?.code !== 'EEXIST' && error?.code !== 'EPERM') throw error;
-    fs.rmSync(filePath, { force: true });
-    fs.renameSync(tempPath, filePath);
-  }
 }
 
 function assertFile(filePath, field) {
@@ -1034,7 +1009,7 @@ function updateStatus(extra = {}) {
     current_message_id: activeBots.length === 1 ? botStates[activeBots[0]].current_message_id : null,
     bot_states: botStates,
   };
-  atomicWriteJson(STATUS_PATH, status);
+  publishStatus(status);
 }
 
 function updateBotStatus(bot, extra) {
@@ -1226,6 +1201,9 @@ let lockFd = null;
 let heartbeatTimer = null;
 let stopping = false;
 let status = {};
+const publishStatus = createStatusPublisher(STATUS_PATH, {
+  onError: error => log('status_write_failed', error),
+});
 let seenIds = [];
 let receiptIds = [];
 let progressIds = [];

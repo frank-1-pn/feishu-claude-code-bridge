@@ -15,7 +15,11 @@ function Read-JsonFile {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
-        return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        # Permit atomic replacement while this reader holds the old snapshot.
+        $stream = [System.IO.File]::Open($Path, 'Open', 'Read', ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+        try { return $reader.ReadToEnd() | ConvertFrom-Json }
+        finally { $reader.Dispose(); $stream.Dispose() }
     } catch {
         return $null
     }
@@ -147,7 +151,10 @@ $report = [ordered]@{
         bot_states = if ($workerStatus) { $workerStatus.bot_states } else { $null }
         last_success_at = if ($workerStatus) { $workerStatus.last_success_at } else { $null }
         last_error = if ($workerStatus) { $workerStatus.last_error } else { $null }
+        status_write_failures = if ($workerStatus) { $workerStatus.status_write_failures } else { $null }
+        last_status_write_error = if ($workerStatus) { $workerStatus.last_status_write_error } else { $null }
     }
+    recovery = Read-JsonFile -Path (Join-Path $DaemonDir 'state/watchdog.json')
     bots = $botReports
 }
 
