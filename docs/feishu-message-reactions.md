@@ -54,5 +54,12 @@ health and does not cause the watchdog to restart a healthy connection.
 - Full bridge regression: 122 tests passed.
 - Both configured bots successfully created, read and removed a temporary native
   reaction on an authorized message; cleanup was verified through the list API.
-- Live automatic state changes and client appearance await deployment and a
-  real-message check; API preflight alone is not an end-to-end acceptance claim.
+- Deployed on 2026-09-27 from pushed revision `a9fc14e`, with a recoverable
+  runtime backup. Only the bridge worker reloaded; both existing subscriber
+  processes remained unchanged. Runtime module and installed skill-reference
+  copies match the reviewed source.
+- Both bots report zero pending, blocked and failed feedback operations after
+  startup; transport, delivery and feedback health checks pass.
+- Automatic reaction transitions on a new user message and client appearance
+  still await a real-message check. API preflight and healthy startup alone are
+  not an end-to-end acceptance claim.
