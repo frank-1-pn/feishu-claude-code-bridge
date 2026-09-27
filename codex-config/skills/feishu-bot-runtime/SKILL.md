@@ -1,6 +1,6 @@
 ---
 name: feishu-bot-runtime
-description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会话的消息、卡片按钮、条件表单和文件交付。复用现有 daemon，不另启订阅。
+description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会话的消息、卡片按钮、条件表单、文件交付，以及按 Bot 场景整理文档和归类文件。复用现有 daemon，不另启订阅。
 ---
 
 # 飞书 bot 运行时
@@ -30,6 +30,7 @@ description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会�
 
 - 连接、断连恢复、入站或回包故障：读下面的连接与判活、常见故障。
 - 卡片排版、修改按钮、批量条件表单、状态显示、报告和附件：读 [references/interaction-and-delivery.md](references/interaction-and-delivery.md)。bridge 的入站提示已携带基本输出协议；无需在每轮重复加载无关操作流程。
+- 收到文件后的文档整理、主题归类、本地知识库/项目附件/飞书云空间归档：读 [references/document-organization.md](references/document-organization.md)。默认去向从当前 bot 私有配置读取；收到或备份文件不等于已整理完成。
 - 仅检查文档或调整输出规范时，不启动、重启或重新绑定运行时。
 
 ## 连接与判活
