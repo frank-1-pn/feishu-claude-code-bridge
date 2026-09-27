@@ -8,6 +8,8 @@ import { reportPolicy } from './codex-bridge-report.mjs';
 import { sanitizeFeishuReply } from './codex-bridge-sanitize.mjs';
 import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 import { classifyFailure, retryDelay } from './codex-bridge-retry.mjs';
+import { normalizeCloudMarkdown } from './codex-bridge-cloud-markdown.mjs';
+import { presentCloudDoc, CLOUD_DOC_PRESENTATION_VERSION } from './codex-bridge-cloud-presentation.mjs';
 
 export const CLOUD_DOC_POLICY = Object.freeze({ maxSourceBytes: 512 * 1024, maxBlocks: 5000, batchBlocks: 1000,
   maxBatchBytes: 1024 * 1024, maxAttempts: 5 });
@@ -18,7 +20,7 @@ const fail = code => Object.assign(Error(code), { code, permanent: true });
 const token = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(value);
 const idKey = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const openId = value => typeof value === 'string' && /^ou_[A-Za-z0-9_-]+$/.test(value);
-const allowedTypes = new Set([2,3,4,5,6,7,8,9,10,11,12,13,14,15,17,22,31,32,34]);
+const allowedTypes = new Set([2,3,4,5,6,7,8,9,10,11,12,13,14,15,17,19,22,31,32,34]);
 const privacy = Object.freeze({ external_access_entity:'closed', link_share_entity:'closed',
   manage_collaborator_entity:'collaborator_full_access', comment_entity:'anyone_can_view' });
 const permissionCodes = new Set(['99991672','99991668','1770032','1770040','1063002','1063004']);
@@ -234,8 +236,11 @@ export class CloudDocOutbox {
   async advance(s) {
     if (s.phase==='convert') {
       const converted=await this.api('POST','/open-apis/docx/v1/documents/blocks/convert',{user_id_type:'open_id'},
-        {content_type:'markdown',content:s.text});
-      Object.assign(s,cloudDocBatches(converted));delete s.text;s.phase='create';this.save(s);
+        {content_type:'markdown',content:normalizeCloudMarkdown(s.text)});
+      // Persist the exact styled payload before any remote creation. Pending
+      // writes from older versions keep their saved batches and idempotency key.
+      Object.assign(s,cloudDocBatches(presentCloudDoc(converted)),{presentationVersion:CLOUD_DOC_PRESENTATION_VERSION});
+      delete s.text;s.phase='create';this.save(s);
     }
     if (s.phase==='create') {
       if (s.createPending) throw fail('cloud_doc_create_uncertain');

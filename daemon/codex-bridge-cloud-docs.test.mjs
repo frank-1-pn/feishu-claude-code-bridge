@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DurableInbox, digest } from './codex-bridge-inbox.mjs';
 import { CloudDocOutbox, cloudDocBatches } from './codex-bridge-cloud-docs.mjs';
+import { CLOUD_DOC_PRESENTATION_VERSION } from './codex-bridge-cloud-presentation.mjs';
 
 const paragraph=(id,content='正文')=>({block_id:id,block_type:2,text:{elements:[{text_run:{content}}]}});
 const converted=(n=1)=>({first_level_block_ids:Array.from({length:n},(_,i)=>`block${i}`),
@@ -186,4 +187,28 @@ test('live Drive appid owner is allowed only when it matches the selected CLI ap
     assert.equal(o.result(f.job.replyKey).status,own?'ready':'blocked');
     if(!own)assert.equal(f.server.blocks.length,0);
   }
+});
+
+test('automatic report applies native presentation while preserving the authorized answer and stable retry payload',async t=>{
+  const text='结论：内容保持完整。\n\n| 项目 | 值 |\n\n| --- | --- |\n\n| 中文 | 42 |';
+  const c={first_level_block_ids:['conclusion','heading','code'],blocks:[
+    paragraph('conclusion','结论：内容保持完整。'),
+    {block_id:'heading',block_type:4,heading2:{elements:[{text_run:{content:'原始代码'}}]}},
+    {block_id:'code',block_type:14,code:{style:{language:30},elements:[{text_run:{content:'console.log("中文");\n'}}]}}
+  ]};
+  const f=fixture(t,{text,conversion:c});let lost=false;
+  f.server.after=async call=>{if(call.url.endsWith('/descendant')&&!lost){lost=true;throw Object.assign(Error('lost'),{code:'ECONNRESET'});}};
+  let o=new CloudDocOutbox(f.options);o.enqueue({...f.enqueue,force:true});await o.flush();
+  assert.equal(f.server.calls.find(c=>c.url.endsWith('/blocks/convert')).data.content,
+    '结论：内容保持完整。\n\n| 项目 | 值 |\n| --- | --- |\n| 中文 | 42 |');
+  assert.equal(f.job.reply,text);assert.deepEqual(f.server.conversion,c);
+  const row=JSON.parse(fs.readFileSync(path.join(o.dir,`doc-${o.key(f.job.replyKey)}.json`),'utf8'));
+  assert.equal(row.presentationVersion,CLOUD_DOC_PRESENTATION_VERSION);assert.equal(row.answerHash,digest(text));
+  assert(f.server.blocks.some(b=>b.block_type===19));
+  const code=f.server.blocks.find(b=>b.block_type===14);
+  assert.equal(code.code.style.wrap,true);assert.deepEqual(code.code.elements,c.blocks[2].code.elements);
+  f.clock.now+=100000;o=new CloudDocOutbox(f.options);await o.flush();
+  assert.equal(o.result(f.job.replyKey).status,'ready');assert.equal(f.server.docs,1);
+  assert.equal(f.server.calls.filter(c=>c.url.endsWith('/blocks/convert')).length,1);
+  const writes=f.server.calls.filter(c=>c.url.endsWith('/descendant'));assert.equal(writes.length,2);assert.deepEqual(writes[0],writes[1]);
 });

@@ -11,6 +11,16 @@
 - 保护性上限为 512 KiB 源文、5000 个块、每批约 1 MiB；超限、异常树结构和不能可靠创建的块明确降级附件，不静默截断。
 - 生成完成后只投递一次“打开完整报告”链接。云文档尚未完成时不冒充成功；失败只提示附件仍可用。是否已经实际读到文档仍需用户打开验证。
 
+## 原生报告排版
+
+云文档转换完成后，使用独立的 `codex-bridge-cloud-presentation.mjs` 增加原生样式。标题保留原有级别，一、二级标题强调字重和颜色；明确标注“结论”的短段落或章节使用浅蓝高亮区，包含原有要点，不生成摘要或推断。未写结论时不猜测，不把整篇报告包进高亮区。
+
+表格首行设为表头，文字加粗并使用浅蓝背景，按内容估算列宽；宽表保留可读的最小宽度，由原生客户端横向滚动。代码块保留全部字符和语言，开启自动换行。原有链接、非默认颜色及特殊内联元素保留；不自动添加配图，也不重写正文。
+
+转换前仅修复可以明确识别的外侧竖线表格中多余的行间空白。围栏代码、缩进代码、引用示例、含转义或行内代码的复杂表格不做猜测修复；原最终答案的授权哈希、Markdown 和 HTML 附件不变。飞书当前块接口没有行距、段前距、段后距字段，因此不宣称调整了这些未支持的样式。
+
+样式版本和实际写入批次一起保存。升级时只对尚未转换的新报告应用排版；已有完成文档不批量改写，正在写入的旧批次仍沿用原正文、版本和幂等键，避免重启后重复或改变待重试的请求。
+
 ## 权限与目录
 
 私有 binding 可设置：
@@ -78,19 +88,24 @@ await cloudDocs.flush();
 
 ## 验证
 
-`node --test daemon/codex-bridge-cloud-docs.test.mjs`：12 项针对性测试通过。覆盖表格/代码/图片转换、完整子树分批、稳定去重、创建响应丢失、已提交写入响应丢失后的重启、部分批次恢复、权限失败及修复后继续原文档、分享确认丢失、错误协作者、链接权限漂移、错绑、损坏检查点、伪造最终答复、错误云文档域名，以及真实 API 返回的 `appid` 类型所有者。仅允许所选 CLI profile 的同一 app ID，不把任意应用都当作合法所有者。
+`node --test daemon/codex-bridge-cloud-*.test.mjs`：33 项针对性测试通过；合并后的 `node --test daemon/*.test.mjs` 全套 268 项通过，0 失败、0 跳过。覆盖表格/代码/图片转换、完整子树分批、稳定去重、创建响应丢失、已提交写入响应丢失后的重启、部分批次恢复、权限失败及修复后继续原文档、分享确认丢失、错误协作者、链接权限漂移、错绑、损坏检查点、伪造最终答复、错误云文档域名，以及真实 API 返回的 `appid` 类型所有者。另验证样式保留文字/链接/代码、重复转换、5000 块与深度边界、表格空行修复及格式化后写入丢失响应的幂等恢复。仅允许所选 CLI profile 的同一 app ID，不把任意应用都当作合法所有者。
 
 2026-09-27 经明确授权，用 Bot1 创建一份标明“验收测试”的新文档，未发送聊天通知。真实 API 回读已验证：原生中文表格块、JavaScript 代码块及正文存在；链接来自元数据接口；协作者仅当前应用所有者与绑定用户，后者为 `view`；组织/公开链接分享及组织外分享均关闭。创建遇到所有者 `appid` 类型的兼容问题后，修复并继续同一条持久记录，全程只创建这一份文档。
 
 测试首次回读发现测试输入在 Markdown 表格行间误加空行，故未形成表格；已在同一份本轮新建测试文档追加正确表格并再次回读通过。此检查同时说明“接口成功”不足以证明表格存在。
 
-带 URL、资源 ID 和原始回读证据的验收 proof 保存在本机私有临时目录，不提交仓库。绑定用户实际打开及手机上的表格/代码显示仍待客户端验收；移动端视觉效果不能由 API 回执代替。
+同日用户指出文档只有默认 Markdown 样式。回查发现首次无效表格仍留在前半段，追加修正版并未清理它。本次先备份同一验收文档全部原生块，核对未被修改，再写入经过排版的新块、回读确认后定向移除旧块；原链接和权限不变。残留竖线表格及重复表格已清理，正文、代码字符和来源链接保持。回读确认浅蓝结论高亮、原生表头、表头粗体及浅蓝背景、紧凑列宽和代码自动换行。
+
+真实写入曾因给代码块额外设置 `background_color` 返回 `4000501`。同一负载只删除该字段即成功，因此排版模块不再生成代码背景字段，并有对应回归测试；通用 TextStyle 字段存在不等于每类块均可使用。
+
+更新后的原链接已发给绑定 Bot1 并回读确认。用户打开后明确回复“版式符合预期”，补齐本次手机显示验收。带 URL、资源 ID 和原始回读证据的 proof 保存在本机私有临时目录，不提交仓库；该验收不代表任意宽表或所有未来报告都已检查。
 
 ## 官方接口依据（2026-09-27 核对）
 
 - [创建文档](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/create)：空文档创建、目录约束，未提供幂等创建参数。
 - [Markdown/HTML 转换为文档块](https://open.feishu.cn/document/ukTMukTMukTM/uUDN04SN0QjL1QDN/document-docx/docx-v1/document/convert)：转换类型、表格只读属性、图片 URL 映射。
 - [创建嵌套块](https://open.feishu.cn/document/docs/docs/document-block/create-2)：1000 块限制、UUIDv4 幂等键和文档版本。
+- [块的数据结构](https://open.feishu.cn/document/docs/docs/data-structure/block)：原生高亮区、文字颜色、表头、列宽及代码自动换行；仅使用官方支持的字段。
 - [更新云文档权限设置](https://open.feishu.cn/document/server-docs/docs/permission/permission-public/patch-2)、[读取权限设置](https://open.feishu.cn/document/server-docs/docs/permission/permission-public/get-2)：关闭链接分享、限制协作者管理权限。
 - [增加协作者](https://open.feishu.cn/document/server-docs/docs/permission/permission-member/create)、[读取协作者](https://open.feishu.cn/document/server-docs/docs/permission/permission-member/list)：定向用户授权及结果核对。
 - [获取文档元数据](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/drive-v1/meta/batch_query)：取得云文档实际访问链接。
