@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>完整答复报告</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#18243b;font:16px/1.8 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;overflow-wrap:anywhere}main{max-width:900px;margin:32px auto;padding:36px 48px;background:white;border:1px solid #e0e6ef;border-radius:18px}header{border-bottom:1px solid #e0e6ef;padding-bottom:20px;margin-bottom:28px}header p{margin:4px 0;color:#546580;font-size:14px}.eyebrow{color:#236b63;font-size:12px;letter-spacing:.12em}h1{font-size:29px;margin:4px 0}h2{font-size:23px;margin:32px 0 12px}h3,h4,h5,h6{margin:24px 0 10px;line-height:1.5}p{margin:12px 0}a{color:#125fad;text-decoration-thickness:1px;text-underline-offset:3px}sup{font-size:11px;margin-left:3px;white-space:nowrap}ul,ol{padding-left:25px}li{padding:3px 0}code{font:14px/1.7 Consolas,"SFMono-Regular",monospace;background:#eff3f8;border-radius:4px;padding:2px 5px;overflow-wrap:anywhere}figure{margin:20px 0}figcaption{font-size:12px;background:#e9eff6;padding:5px 14px;color:#44566b;border-radius:9px 9px 0 0}pre{max-width:100%;overflow:auto;background:#f2f5f9;border:1px solid #e0e6ef;border-radius:9px;padding:16px;font:13px/1.8 Consolas,"SFMono-Regular",monospace;tab-size:2}pre code{padding:0;background:none;white-space:pre;overflow-wrap:normal}blockquote{margin:18px 0;padding:10px 18px;border-left:3px solid #6c9dc7;background:#f5f8fc;color:#44546b}.table-scroll{max-width:100%;overflow-x:auto;margin:20px 0;border:1px solid #dce4ee;border-radius:9px}table{border-collapse:collapse;width:100%;min-width:350px;font-size:14px}th,td{padding:11px 14px;border-bottom:1px solid #e1e7ef;text-align:left;vertical-align:top;min-width:90px}th{background:#edf3f8;font-weight:650}tr:last-child td{border-bottom:0}.sources{border-top:1px solid #e0e6ef;margin-top:32px}.source-url{display:block;font-size:12px;color:#66758a}.unlinked{color:#596980}details{border-top:1px solid #e0e6ef;margin-top:28px;padding-top:16px}summary{cursor:pointer;font-size:14px;color:#4c617a}details pre{white-space:pre-wrap;overflow-wrap:anywhere}footer{color:#63738a;font-size:12px;margin-top:28px}hr{border:0;border-top:1px solid #e0e6ef;margin:24px 0}@media(max-width:600px){body{background:#fff}main{margin:0;padding:24px 20px;border:0;border-radius:0}h1{font-size:25px}h2{font-size:21px}pre{padding:12px}th,td{padding:9px 11px}}@media print{body{background:#fff;font-size:11pt}main{max-width:none;margin:0;padding:0;border:0}a{color:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere}pre code{white-space:pre-wrap}table{min-width:0}.table-scroll{overflow:visible}h2,h3{break-after:avoid}details,footer{display:none}header{padding-bottom:10px;margin-bottom:16px}}</style></head>
+<body><main><header><span class="eyebrow">完整答复 · 可离线阅读</span><h1>完整答复报告</h1><p>正文保留本轮答复；原文同时以 Markdown 文件提供。</p></header><article><h2>飞书机器人交互优化验收</h2>
+<p><strong>结论：本轮方案已完成本地验证。</strong> 先显示关键结论，完整结果保留在附件中；飞书实际客户端显示仍需发布后验收。</p>
+<h3>验收结果</h3>
+<ul><li>已验证：中文、表格、代码与来源链接显示正常。</li><li>已验证：报告原文完整保留，原始附件没有改动。</li><li>待确认：飞书客户端内的预览和文件送达。</li></ul>
+<div class="table-scroll" role="region" aria-label="数据表格" tabindex="0"><table><thead><tr><th scope="col">能力</th><th scope="col">本地结果</th><th scope="col">边界</th></tr></thead><tbody><tr><td>简短卡片</td><td>已完成</td><td>首屏显示结论</td></tr><tr><td>HTML 报告</td><td>已完成</td><td>离线可读、手机适配</td></tr><tr><td>文件发送</td><td>已完成模拟测试</td><td>不把排队当成已送达</td></tr></tbody></table></div>
+<h3>实现示例</h3>
+<figure class="code-block"><figcaption>javascript</figcaption><pre><code>const result = prepareReplyReport({ replyKey, text });
+if (result.generated) {
+  console.log(result.artifacts);
+}</code></pre></figure>
+<h3>来源与依据</h3>
+<p>HTML 文件可在聊天内打开预览。<a href="https://www.feishu.cn/hc/en-US/articles/052565607602-view-.html-files-in-feishu" target="_blank" rel="noopener noreferrer">官方说明</a><sup><a href="https://www.feishu.cn/hc/en-US/articles/052565607602-view-.html-files-in-feishu" aria-label="来源 1" target="_blank" rel="noopener noreferrer">[1]</a></sup></p>
+<blockquote>推断：长答复通过文件交付，会减少手机聊天界面的滚动。此判断尚未经过用户使用数据验证。</blockquote>
+<p>原始 HTML 安全示例：&lt;script&gt;window.reportInjected=true&lt;/script&gt;。</p>
+<h3>后续验证</h3>
+<ol><li value="1">发起真实任务并确认目标聊天收到卡片。</li><li value="2">打开报告与 Markdown 原文，逐项核对。</li><li value="3">断网恢复后确认附件不重复发送。</li></ol></article><section class="sources"><h2>来源链接</h2><ol><li><a href="https://www.feishu.cn/hc/en-US/articles/052565607602-view-.html-files-in-feishu" target="_blank" rel="noopener noreferrer">官方说明</a><span class="source-url">https://www.feishu.cn/hc/en-US/articles/052565607602-view-.html-files-in-feishu</span></li></ol></section><details><summary>查看原始 Markdown</summary><pre id="raw-answer"># 飞书机器人交互优化验收
+
+**结论：本轮方案已完成本地验证。** 先显示关键结论，完整结果保留在附件中；飞书实际客户端显示仍需发布后验收。
+
+## 验收结果
+
+- 已验证：中文、表格、代码与来源链接显示正常。
+- 已验证：报告原文完整保留，原始附件没有改动。
+- 待确认：飞书客户端内的预览和文件送达。
+
+| 能力 | 本地结果 | 边界 |
+| --- | --- | --- |
+| 简短卡片 | 已完成 | 首屏显示结论 |
+| HTML 报告 | 已完成 | 离线可读、手机适配 |
+| 文件发送 | 已完成模拟测试 | 不把排队当成已送达 |
+
+## 实现示例
+
+```javascript
+const result = prepareReplyReport({ replyKey, text });
+if (result.generated) {
+  console.log(result.artifacts);
+}
+```
+
+## 来源与依据
+
+HTML 文件可在聊天内打开预览。[官方说明](https://www.feishu.cn/hc/en-US/articles/052565607602-view-.html-files-in-feishu)
+
+&gt; 推断：长答复通过文件交付，会减少手机聊天界面的滚动。此判断尚未经过用户使用数据验证。
+
+原始 HTML 安全示例：&lt;script&gt;window.reportInjected=true&lt;/script&gt;。
+
+## 后续验证
+
+1. 发起真实任务并确认目标聊天收到卡片。
+2. 打开报告与 Markdown 原文，逐项核对。
+3. 断网恢复后确认附件不重复发送。</pre></details><footer>来源链接由答复原文提取；链接存在不代表内容已额外核验。</footer></main></body></html>

@@ -1,0 +1,30 @@
+{
+  "checked_at": "2026-09-27T08:17:26.998Z",
+  "visible_messages_sent": false,
+  "results": [
+    {
+      "bot": "bot1",
+      "mode": "complete",
+      "ok": true,
+      "bytes": 7521
+    },
+    {
+      "bot": "bot1",
+      "mode": "waiting",
+      "ok": true,
+      "bytes": 2572
+    },
+    {
+      "bot": "coding",
+      "mode": "complete",
+      "ok": true,
+      "bytes": 7521
+    },
+    {
+      "bot": "coding",
+      "mode": "waiting",
+      "ok": true,
+      "bytes": 2572
+    }
+  ]
+}

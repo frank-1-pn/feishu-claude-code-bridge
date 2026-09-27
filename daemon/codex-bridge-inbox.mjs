@@ -174,7 +174,8 @@ export class DurableInbox {
         if (j.replyRetry.blocked || (j.replyRetry.retryAt ?? 0) > this.now()) continue;
         try {
           const streamKeys = [...this.jobs.values()].filter(other => other.replyKey === j.replyKey).map(other => other.streamKey).filter(Boolean);
-          await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys);
+          const peers=[...this.jobs.values()].filter(other=>other.replyKey===j.replyKey);
+          await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys, {jobId:j.id,replyKey:j.replyKey,jobs:peers});
           atomicJson(receipt, { sentAt: this.now() });
         } catch (error) { recordFailure(j.replyRetry, error, this.now()); atomicJson(retryFile,j.replyRetry); this.save(j); continue; }
       }

@@ -21,6 +21,13 @@ export async function launchAppend({ executable, args, log, errorLog, pidFile })
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [executable,log,errorLog,pidFile,profile='']=process.argv.slice(2);
-  const args=[...(profile?['--profile',profile]:[]),'event','+subscribe','--event-types','im.message.receive_v1','--compact','--as','bot'];
+  const args=subscriberArgs(profile);
   const pid=await launchAppend({executable,args,log,errorLog,pidFile});process.stdout.write(JSON.stringify({pid})+'\n');
+}
+
+// Both event types share the same authenticated WebSocket and CLI singleton.
+// The v1.0.39 generic processor preserves nested action/operator/context fields.
+export function subscriberArgs(profile='') {
+  return [...(profile?['--profile',profile]:[]),'event','+subscribe','--event-types',
+    'im.message.receive_v1,card.action.trigger','--compact','--as','bot'];
 }

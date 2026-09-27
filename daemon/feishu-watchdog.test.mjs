@@ -21,7 +21,11 @@ if($ok){exit 0};exit 1
   fs.writeFileSync(path.join(dir, 'start-codex-bridge.ps1'), "[IO.File]::AppendAllText((Join-Path $PSScriptRoot 'starts'),'1');exit 0");
   fs.writeFileSync(path.join(dir, 'ensure-bot.ps1'), "throw 'healthy subscriber must not restart'");
   const script = path.join(dir, 'feishu-watchdog.ps1');
-  fs.copyFileSync(new URL('./feishu-watchdog.ps1', import.meta.url), script);
+  const watchdog=fs.readFileSync(new URL('./feishu-watchdog.ps1',import.meta.url),'utf8');
+  assert.ok(watchdog.includes("'Global\\LarkCodexWatchdog-v2'"));
+  // A fixture must not contend with the live scheduled supervisor. Only the
+  // mutex namespace changes; recovery code and all three invocations are real.
+  fs.writeFileSync(script,watchdog.replace("'Global\\LarkCodexWatchdog-v2'",`'Local\\LarkWatchdogTest-${process.pid}-${path.basename(dir)}'`));
   execFileSync('powershell.exe', ['-NoProfile', '-File', script, '-NoAlert'], { timeout: 20000 });
   assert.equal(fs.readFileSync(path.join(dir, 'starts'), 'utf8'), '1');
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'state/watchdog.json'))).healthy, true);

@@ -38,6 +38,9 @@ import { createLarkTransport } from './codex-bridge-lark.mjs';
 import { DurableOutbound } from './codex-bridge-outbound.mjs';
 import { FileOutbox } from './codex-bridge-files.mjs';
 import { recordFailure } from './codex-bridge-retry.mjs';
+import { ActionStore } from './codex-bridge-actions.mjs';
+import { createReplyDelivery } from './codex-bridge-delivery.mjs';
+import { UX_PROMPT, bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -334,6 +337,7 @@ function buildPrompt(binding, event) {
     + '同一 message_id 的重复投递只视作同一请求，不重复执行已完成的操作。'
     + '不要输出隐藏思考过程；最终答复只包含最终结果并由 bridge 回传。'
     + `需要交付用户要求的本地文件时，用 node "${path.join(DAEMON_DIR, 'codex-bridge-send.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --file "绝对路径" 排入发送队列；只能提交用户要求的交付物，不能仅因链接提到了本地文件就上传。默认 --mode file；图片可用 image，音频 audio，视频 video 需 --cover 封面路径。文件限30MiB，图片10MiB，默认只允许当前工作目录。排队不等于送达。`
+    + UX_PROMPT
     + '若末尾为 ...(truncated)，先按 message_id 用现有 messages-mget 流程取全文。正文：';
   return content.includes('\n') || content.includes('\r')
     ? `${prefix}\n${content}`
@@ -1126,9 +1130,16 @@ async function sendDurableText(binding, text, key) {
 
 
 async function durableBotLoops(binding) {
-  const outbound = new DurableOutbound(path.join(DAEMON_DIR, 'state', 'outbound-v3'), binding, lark);
+  const actions=new ActionStore({root:path.join(DAEMON_DIR,'state','actions-v1'),bot:binding.bot});
+  const outbound = new DurableOutbound(path.join(DAEMON_DIR, 'state', 'outbound-v3'), binding, lark, {
+    presentationEnabled:true,
+    onCardMessage:(messageId,presentation)=>{if(presentation?.actionContext) actions.bindMessage(presentation.actionContext,messageId);},
+  });
   const files = new FileOutbox(path.join(DAEMON_DIR, 'state', 'file-outbox'), binding,
     (...args) => outbound.serial(() => lark(...args)), {notify:(text,key)=>outbound.text(text,key)});
+  const final=createReplyDelivery({binding,actions,outbound,files,log,reportOptions:{
+    reportRoot:path.join(DAEMON_DIR,'state','reports-v1'),fileOutboxRoot:path.join(DAEMON_DIR,'state','file-outbox'),inboxRoot:INBOX_ROOT,
+  }});
   const inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
     prepare: event => prepareInbound(binding,event,{ download:lark, downloadRoot:path.join(os.homedir(),'lark-downloads','codex-inbox'), writeText:atomicWriteText }),
     target: async () => {
@@ -1147,10 +1158,18 @@ async function durableBotLoops(binding) {
       }
     },
     send: (text,key) => outbound.text(text,key),
-    final: (text,key,streams) => outbound.final(text,key,streams),
+    final,
     progress: (text,key) => outbound.progress(text,key),
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
+  // Private pending jobs are tied to the originating mapping. Rebinding a bot
+  // must not replay an old job or publish its answer into a different session.
+  for(const job of inbox.jobs.values()) {
+    if(job.status!=='done' && !isBoundJob(binding,job)) {
+      job.status='failed';job.error='binding_changed';job.blocked=true;job.receipted=true;
+      delete job.notice;delete job.pendingProgress;inbox.save(job);
+    }
+  }
   const loop = async (name,fn,delay=500) => {
     while (!stopping) {
       try { await fn(); }
@@ -1161,14 +1180,31 @@ async function durableBotLoops(binding) {
       await sleep(delay);
     }
   };
+  let actionDrain={blocked:0,pending:0};
   const intake = async () => {
     for(let i=0;i<100;i++) {
       const record=readNextLine(binding); if(!record) break;
       let event;
       try { event=JSON.parse(record.lineBytes.toString('utf8').replace(/^\uFEFF/,'')); } catch {}
+      if(event && record.lineBytes.length<=config.runtime.max_inbound_bytes
+          && (event.type==='card.action.trigger' || event.header?.event_type==='card.action.trigger')) {
+        // The selected NDJSON source fixes authenticatedBot. Never trust a bot,
+        // thread, prompt or recipient supplied in the callback value itself.
+        const accepted=actions.acceptCallback(event,{binding,authenticatedBot:binding.bot});
+        if(accepted.reason==='storage_unavailable') throw new Error('action_storage_unavailable');
+        if(accepted.accepted) actionDrain=actions.drain({binding,inbox});
+        else {
+          log('card_action_rejected',{bot:binding.bot,reason:accepted.reason??'invalid'});
+          const payload=event.event??event;
+          if(payload.operator?.open_id===binding.allowed_sender_id && payload.context?.open_chat_id===binding.chat_id
+              && accepted.response?.toast?.content) {
+            await outbound.text(accepted.response.toast.content,`action-notice:${event.header?.event_id??event.event_id??digest(record.lineBytes)}`);
+          }
+        }
+      }
       if (event && record.lineBytes.length<=config.runtime.max_inbound_bytes && isAuthorizedEvent(binding,event) && isFreshEvent(event)) {
         const id=event.message_id??event.id;
-        if(!seenIds.includes(id)) inbox.enqueue(event);
+        if(!seenIds.includes(id)) inbox.enqueue({...event,bridge_binding:bindingSnapshot(binding)});
       }
       if(!writeOffset(binding,record.offset,record.nextOffset,record.originalBytes)) break;
     }
@@ -1176,10 +1212,13 @@ async function durableBotLoops(binding) {
   const receipts = async () => {
     for(const j of inbox.jobs.values()) {
       if(j.receipted) continue;
+      if(!isBoundJob(binding,j))continue;
       j.receiptRetry ??= {};
       if (j.receiptRetry.blocked || (j.receiptRetry.retryAt ?? 0) > Date.now()) continue;
       try {
-        if(!receiptIds.includes(j.id)) await outbound.text('已保存，正在投递到当前 Codex 会话；图片和文件会下载后交给会话读取。',`receipt:${j.id}`);
+        if(!receiptIds.includes(j.id)) await outbound.text(j.event.synthetic_callback
+          ? '要求已保存，正在交给当前会话继续处理。'
+          : '已保存，正在投递到当前 Codex 会话；图片和文件会下载后交给会话读取。',`receipt:${j.id}`);
         j.receipted=true;
       } catch (error) { recordFailure(j.receiptRetry,error); }
       inbox.save(j);
@@ -1192,11 +1231,15 @@ async function durableBotLoops(binding) {
     const stats=inbox.stats();
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
     const fileStats=files.stats();
-    updateBotStatus(binding.bot,{...stats,...fileStats,state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count?'degraded':busy?'processing':'idle',
+    const actionStats=actions.stats();
+    updateBotStatus(binding.bot,{...stats,...fileStats,action_accepted_count:actionStats.accepted_count,
+      action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
+      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };
   await Promise.all([loop('intake',intake),loop('dispatch',()=>inbox.dispatchOne()),
+    loop('actions',()=>{actionDrain=actions.drain({binding,inbox});}),
     loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000),
     loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000)]);
 }

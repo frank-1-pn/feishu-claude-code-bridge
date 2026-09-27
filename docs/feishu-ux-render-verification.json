@@ -1,0 +1,33 @@
+{
+    "checkedAt":  "2026-09-27T08:11:19.697Z",
+    "report":  "docs/feishu-generated-report-example.html",
+    "browser":  "Microsoft Edge headless",
+    "consoleErrors":  0,
+    "printPdf":  true,
+    "results":  [
+                    {
+                        "name":  "mobile",
+                        "width":  390,
+                        "scrollWidth":  390,
+                        "height":  1875,
+                        "tableCount":  1,
+                        "externalAssets":  0,
+                        "injected":  false,
+                        "unsafeLinks":  0,
+                        "rawAnswerMatches":  true,
+                        "detailsInteraction":  true
+                    },
+                    {
+                        "name":  "desktop",
+                        "width":  1280,
+                        "scrollWidth":  1265,
+                        "height":  1730,
+                        "tableCount":  1,
+                        "externalAssets":  0,
+                        "injected":  false,
+                        "unsafeLinks":  0,
+                        "rawAnswerMatches":  true,
+                        "detailsInteraction":  true
+                    }
+                ]
+}
