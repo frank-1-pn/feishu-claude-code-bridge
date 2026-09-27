@@ -48,7 +48,7 @@ bridge 的线程推进有两条互斥路径：目标 thread 已被 Orca/Codex �
 
 Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runtime 已经接受并排队 agent prompt。此时不能立刻向飞书发失败提示；以 rollout 中带 `message_id` 的 user marker 为入站权威，并等待对应最终答复。marker 等待超时表示尚未确认入站；已有 marker 后等待 final 超时表示答复迟到，不能倒推成注入失败或重投任务。
 
-匹配 chat 与 sender 白名单的事件先保存到 `daemon/state/codex-inbox-v2/<bot>/` 再推进 codex offset。回执仅表示持久保存，不等于模型已读。每条记录区分 queued、submitted、delivered、reply_pending、done、failed。投递前记录 submitted；CLI 超时先核对 rollout，不自动重投。重启按记录继续。原始正文与附件目录属于私有运行状态，不可提交 Git。
+匹配 chat 与 sender 白名单的事件先保存到 `daemon/state/codex-inbox-v2/<bot>/` 再推进 codex offset。常规消息、按钮和表单受理成功后不发“已保存／正在投递”回执，保留公开进度、最终答复与异常提示。每条记录区分 queued、submitted、delivered、reply_pending、done、failed。投递前记录 submitted；CLI 超时先核对 rollout，不自动重投。重启按记录继续。原始正文与附件目录属于私有运行状态，不可提交 Git。
 
 状态检查同时看 `transport_healthy`、`delivery_healthy` 和各 bot 的 queued_count、awaiting_delivery_count、awaiting_reply_count、failed_count、last_delivered_at。`healthy` 为兼容 supervisor 仍只表示进程/传输；offset 追平也不能单独证明送达。会话压缩时 Orca 可显示 Messages to be submitted after next tool call，这是 terminal 已排队，仍需 rollout marker 证明模型入站；不要盲目重发或打断业务任务。
 
@@ -80,7 +80,7 @@ headless `codex exec resume` 路径使用 `workspace-write`；Orca 已打开的�
 | daemon 在、bridge 不在 | 幂等运行 `start-codex-bridge.ps1`，不要重启 subscribe |
 | bridge 在但消息没推进 | 核对独立 codex offset、chat/sender 白名单和 worker error log |
 | 一个 bot 忙时另一个 bot 不收消息 | 检查 `bot_states` 是否独立；新版 worker 必须是 per-bot processing loop，不能退回全局串行队列 |
-| 飞书无保存回执 | 检查持久 inbox 的 `receipted`、`receiptRetry` 及出站记录；`receipt_offset` 只是诊断游标，旧 `receipt-events.json` 只作兼容去重，不能单独判定新版回执成功 |
+| 飞书无保存回执 | 正常行为，成功受理不另发消息。`receiptSuppressed=true` 表示回执已静默处理；`receipted` 和 `receipt_offset` 均不能证明模型已读或用户收到答复，应核对持久 inbox、rollout marker 和最终投递 |
 | 按钮或表单点击后无答复 | 按引用文档逐段核对订阅过滤、后台回调配置、action 队列、原 thread marker 与最终投递；不以卡片创建成功替代实机点击 |
 | 消息在 composer 停留 | 检查 bridge 是否调用公开的 Orca agent-prompt 接口及 terminal handle 是否匹配 PTY；禁止回退为 raw 正文 + `\r` 两次 write |
 | `thread-store conflict` / `already has an active writer` | 正常情况下 bridge 应自动走 Orca PTY 注入；若仍出现，检查 `resolve-codex-pty.ps1` 能否由 writer PID 唯一定位 PTY，不要放宽沙箱 |

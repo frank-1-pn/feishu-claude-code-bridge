@@ -37,7 +37,6 @@ import { atomicWriteJson, atomicWriteText, createStatusPublisher } from './codex
 import { createLarkTransport } from './codex-bridge-lark.mjs';
 import { DurableOutbound } from './codex-bridge-outbound.mjs';
 import { FileOutbox } from './codex-bridge-files.mjs';
-import { recordFailure } from './codex-bridge-retry.mjs';
 import { ActionStore } from './codex-bridge-actions.mjs';
 import { createReplyDelivery } from './codex-bridge-delivery.mjs';
 import { UX_PROMPT, bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
@@ -1213,14 +1212,11 @@ async function durableBotLoops(binding) {
     for(const j of inbox.jobs.values()) {
       if(j.receipted) continue;
       if(!isBoundJob(binding,j))continue;
-      j.receiptRetry ??= {};
-      if (j.receiptRetry.blocked || (j.receiptRetry.retryAt ?? 0) > Date.now()) continue;
-      try {
-        if(!receiptIds.includes(j.id)) await outbound.text(j.event.synthetic_callback
-          ? '要求已保存，正在交给当前会话继续处理。'
-          : '已保存，正在投递到当前 Codex 会话；图片和文件会下载后交给会话读取。',`receipt:${j.id}`);
-        j.receipted=true;
-      } catch (error) { recordFailure(j.receiptRetry,error); }
+      // Intake is durable already. Settle old receipt retries without emitting
+      // a chat message; progress, final replies and failure notices are separate.
+      j.receiptSuppressed=true;
+      j.receipted=true;
+      delete j.receiptRetry;
       inbox.save(j);
     }
     // This is an intake/receipt diagnostic cursor, not proof of model delivery.
