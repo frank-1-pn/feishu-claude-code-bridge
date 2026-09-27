@@ -46,7 +46,7 @@ return result;
 
 为兼容已经发出的卡片，签名字段 schema、`due` 字段名、原确认 context 与单次提交规则保持不变。回调中的 `yyyy-MM-dd HH:mm +0800` 先移除经过校验的时区后缀，再进行原长度与日期校验；与旧纯文本表示得到同一去重记录。渲染器版本升级只 PATCH 原绑定消息，保留发送幂等键；中途失败重试不会多发一张表单。旧表单中的无效日期不会作为控件默认值，用户可重新选择。
 
-2026-09-27：新增点选、留空、时区、旧表单兼容、重复提交、同卡升级和更新响应丢失后的恢复测试；完整套件 247 项通过。Bot1 真实 CardKit 接口已接受带可选日期时间控件的表单实体，未通过这一步创建任务。实际点选及回调值仍由新版表单的客户端验收补充。
+2026-09-27：新增点选、留空、时区、旧表单兼容、重复提交、同卡升级和更新响应丢失后的恢复测试；完整套件 247 项通过。Bot1 真实 CardKit 接口接受带可选日期时间控件的表单实体后，再发送新版表单进行真实验收：收到非空日期时间提交，任务回读的截止时间戳与北京时间预期一致，负责人正确且结果通知送达。用户确认“能选择，提交后收到待办链接”。
 
 组件及回调依据：[日期时间选择器](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/interactive-components/date-time-picker)、[表单容器](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/containers/form-container)。
 
