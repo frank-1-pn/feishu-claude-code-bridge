@@ -10,7 +10,8 @@ $current=0
 if(Test-Path -LiteralPath $pidPath){$current=([IO.File]::ReadAllText($pidPath).Trim()) -as [int]}
 $proc=if($current){Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction SilentlyContinue}else{$null}
 $healthy=Test-LarkSubscriber $proc $Profile
-if($healthy -and (Get-LarkSocketSignal $errPath) -eq 'reconnect_exhausted'){
+$socket=Get-LarkSocketHealth -Path (Join-Path $env:TEMP "lark-$Bot-ws-health.json") -Process $proc -Profile $Profile -Required (Test-Path (Join-Path $PSScriptRoot 'subscriber-runtime.json'))
+if($healthy -and ($socket.needs_restart -or (Get-LarkSocketSignal $errPath) -eq 'reconnect_exhausted')){
     # Exact process/profile check; unread events and all offsets stay intact.
     & taskkill.exe /PID $current /T /F | Out-Null
     if($LASTEXITCODE -ne 0){exit 1}

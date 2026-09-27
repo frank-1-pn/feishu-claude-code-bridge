@@ -42,6 +42,10 @@ description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会�
 4. 判活必须同时看：正确 bot 的 subscribe PID、bridge PID、worker 最近处理状态。出站 `messages-send ok=true` 只能证明发送能力，不能单独证明入站链路。
 5. 实际收到匹配 `chat_id + sender_id` 的新事件并成功推进目标 Codex thread，是最强的端到端正向信号。
 
+安装 `subscriber-runtime.json` 对应的固定版本 CLI 后，`socket_verified` 来自真实 SDK pong，并校验 PID、profile 与进程创建时间；`pong_age_seconds`、`socket_signal`、`socket_needs_restart` 用于排查静默断连。未应答 ping 超过 30 秒、pong 超过服务端心跳间隔的两倍加 30 秒、SDK 重连超过 60 秒时，由原有 watchdog 调用 `ensure-bot.ps1` 恢复对应 bot；一分钟巡检还会增加最多约一分钟延迟，任务延迟或退避可进一步延长。不要以聊天室没有新消息作为断连依据，也不要手工更新心跳文件制造健康状态。
+
+`FeishuBotWatchdog` 应通过 `wscript.exe //B //NoLogo run-watchdog-hidden.vbs` 启动；由该无控制台入口隐藏启动 PowerShell 并等待退出码。直接以 PowerShell 为计划任务入口即使带 `-WindowStyle Hidden` 仍可能闪窗。重新配置用运行目录的 `configure-feishu-watchdog.ps1`，保留每分钟检查。
+
 bridge 的线程推进有两条互斥路径：目标 thread 已被 Orca/Codex 桌面端持有时，通过 writer lock 的 PID 动态定位现有 Orca terminal，再调用公开的 `orca terminal send --text ... --enter --json` agent-prompt 接口，并从 rollout 等待对应的 `final_answer`；目标 thread 没有活跃 writer 时，才使用 `codex exec resume`。不要在已有 writer 时另起第二个 Codex 进程抢锁。本机 Codex app-server 虽有 `turn/steer`，但另一个 app-server 进程不能附着到已被 Orca TUI 持有的 thread，会被 active-writer lock 拒绝。
 
 不要直接用 terminal daemon 的 raw `write` 模拟正文 + 回车：它没有 key-event 语义，连续写入可能把消息留在 composer。普通消息统一走 Orca 的 agent-prompt 接口；它在后台 daemon 内完成 bracketed paste、Windows ConPTY 1500ms settle delay 和提交，不依赖窗口焦点或屏幕点亮。超过 Windows argv 安全长度的消息才允许 raw bracketed paste，但最终 Enter 仍走 `orca terminal send --enter`。这条路径是 Codex 当前的兼容实现，不得描述成 Claude 官方 `claude/channel`：Codex 尚无能把 MCP notification 原生推进既有会话的 channel capability。
@@ -50,7 +54,7 @@ Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runt
 
 匹配 chat 与 sender 白名单的事件先保存到 `daemon/state/codex-inbox-v2/<bot>/` 再推进 codex offset。常规消息、按钮和表单受理成功后不发“已保存／正在投递”回执，保留公开进度、最终答复与异常提示。每条记录区分 queued、submitted、delivered、reply_pending、done、failed。投递前记录 submitted；CLI 超时先核对 rollout，不自动重投。重启按记录继续。原始正文与附件目录属于私有运行状态，不可提交 Git。
 
-状态检查同时看 `transport_healthy`、`delivery_healthy` 和各 bot 的 queued_count、awaiting_delivery_count、awaiting_reply_count、failed_count、last_delivered_at。`healthy` 为兼容 supervisor 仍只表示进程/传输；offset 追平也不能单独证明送达。会话压缩时 Orca 可显示 Messages to be submitted after next tool call，这是 terminal 已排队，仍需 rollout marker 证明模型入站；不要盲目重发或打断业务任务。
+状态检查同时看 `transport_healthy`、`delivery_healthy` 和各 bot 的 queued_count、awaiting_delivery_count、awaiting_reply_count、failed_count、last_delivered_at。`healthy` 为兼容 supervisor 允许有界的启动和重连宽限期；`transport_healthy` 还要求所有连接的真实 pong 新鲜有效，offset 追平也不能单独证明送达。会话压缩时 Orca 可显示 Messages to be submitted after next tool call，这是 terminal 已排队，仍需 rollout marker 证明模型入站；不要盲目重发或打断业务任务。
 
 rollout 观察只转发显式 commentary 与 final/final_answer 或 task_complete 的最终文本，reasoning 永不外发。公开进度卡片按至少 10 秒节流更新，是快照更新，不是逐 token 流式输出。同一轮消费的多条输入共享一次最终回包；不同轮分别回包。出站分片使用稳定 Feishu idempotency key，网络重试不重新执行模型任务。投递或答复超时明确提示并继续观察迟到结果。
 

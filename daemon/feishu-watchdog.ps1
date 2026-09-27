@@ -1,5 +1,5 @@
 # One bounded recovery owner. The Lark subscriber owns socket reconnection;
-# this task only invokes the existing idempotent launchers for failed processes.
+# this task invokes the existing launchers for dead processes or expired pongs.
 [CmdletBinding()]
 param([string]$RuntimeDir = '', [switch]$NoAlert)
 if (-not $RuntimeDir) { $RuntimeDir = $PSScriptRoot }
@@ -59,7 +59,9 @@ try {
         }
     }
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    $healthy = [bool]$check.Data.healthy
+    # Startup grace prevents restart storms; it is not proof of connectivity.
+    $hasSocketProbe = $null -ne $check.Data.PSObject.Properties['transport_healthy']
+    $healthy = [bool]($check.Data.healthy -and (-not $hasSocketProbe -or $check.Data.transport_healthy))
     $failures = if ($healthy) { 0 } else { [int]$previous.consecutive_failures + 1 }
     $delay = if ($healthy) { 0 } else { [int][math]::Min(600, 60 * [math]::Pow(2, [math]::Min($failures - 1, 4))) }
     $state = [ordered]@{
@@ -73,7 +75,7 @@ try {
         bridge_identity_ok = [bool]$check.Data.bridge.exact_identity
         bridge_heartbeat_fresh = [bool]$check.Data.bridge.heartbeat_fresh
     }
-    if (-not $healthy -and -not $NoAlert -and $now - $state.last_alert_at -ge 1800) {
+    if (-not $healthy -and $failures -ge 3 -and -not $NoAlert -and $now - $state.last_alert_at -ge 1800) {
         # Use the configured primary binding; never copy chat identifiers here.
         $target = $bindings.bindings.bot1
         if ($target.chat_id) {

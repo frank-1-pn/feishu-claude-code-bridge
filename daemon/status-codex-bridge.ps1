@@ -98,12 +98,19 @@ if ($bindings -and $bindings.bindings) {
             if ($stateProperty) { $botState = $stateProperty.Value }
         }
         $socketSignal = Get-LarkSocketSignal (Join-Path $env:TEMP "lark-$bot-daemon.err.log")
+        $socket = Get-LarkSocketHealth -Path (Join-Path $env:TEMP "lark-$bot-ws-health.json") -Process $daemonProcess -Profile ([string]$binding.profile) -Required (Test-Path (Join-Path $DaemonDir 'subscriber-runtime.json'))
         $botReports += [ordered]@{
             bot = $bot
             daemon_pid = if ($daemonPid) { $daemonPid } else { $null }
-            daemon_healthy = [bool]((Test-Subscriber $daemonProcess ([string]$binding.profile)) -and $socketSignal -ne 'reconnect_exhausted')
-            socket_signal = $socketSignal
-            socket_verified = $false
+            daemon_healthy = [bool]((Test-Subscriber $daemonProcess ([string]$binding.profile)) -and -not $socket.needs_restart -and $socketSignal -ne 'reconnect_exhausted')
+            socket_signal = $socket.signal
+            socket_verified = $socket.verified
+            socket_needs_restart = $socket.needs_restart
+            pong_age_seconds = $socket.pong_age_seconds
+            ping_interval_seconds = $socket.ping_interval_seconds
+            pending_ping_age_seconds = $socket.pending_ping_age_seconds
+            socket_generation = $socket.generation
+            silent_failure_detection_bound_seconds = $socket.detection_bound_seconds
             profile = [string]$binding.profile
             event_log_exists = [bool]$logItem
             event_log_bytes = if ($logItem) { [long]$logItem.Length } else { $null }
@@ -137,12 +144,13 @@ if ($bindings -and $bindings.bindings) {
 
 $botsHealthy = ($botReports.Count -gt 0 -and @($botReports | Where-Object { -not $_.daemon_healthy -or -not $_.event_log_exists -or -not $_.cwd_exists }).Count -eq 0)
 $healthy = [bool]($identityOk -and $heartbeatFresh -and $botsHealthy)
+$transportHealthy = [bool]($healthy -and @($botReports | Where-Object { -not $_.socket_verified }).Count -eq 0)
 $report = [ordered]@{
     healthy = $healthy
-    transport_healthy = $healthy
-    delivery_healthy = [bool]($healthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 -or $_.watch_error_count -gt 0 -or $_.outbound_blocked_count -gt 0 -or $_.file_failed_count -gt 0 -or $_.action_blocked_count -gt 0 }).Count -eq 0)
-    socket_health_scope = 'CLI has no structured ping/pong probe; exhausted reconnect is detected, silent half-open connections remain unverified'
-    health_scope = 'healthy reports process/transport; delivery_healthy additionally checks queue failures and stalls; last_delivered_at is rollout evidence'
+    transport_healthy = $transportHealthy
+    delivery_healthy = [bool]($transportHealthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 -or $_.watch_error_count -gt 0 -or $_.outbound_blocked_count -gt 0 -or $_.file_failed_count -gt 0 -or $_.action_blocked_count -gt 0 }).Count -eq 0)
+    socket_health_scope = 'PID/profile/start-time matched SDK pong; unanswered ping 30s, stale pong 2x server interval+30s, reconnect grace 60s; supervisor polls each minute'
+    health_scope = 'healthy permits bounded startup/reconnect grace for supervisor; transport_healthy requires real pong on every socket; delivery_healthy adds queue checks; model ingress still requires rollout evidence'
     checked_at = [DateTimeOffset]::UtcNow.ToString('o')
     bridge = [ordered]@{
         pid = if ($pidRecord) { $pidRecord.pid } else { $null }

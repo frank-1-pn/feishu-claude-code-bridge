@@ -35,3 +35,7 @@ macos/**/*.err
 
 # Private durable message state
 daemon/state/
+
+# Locally built subscriber binary and host-specific installation manifest
+daemon/bin/
+daemon/subscriber-runtime.json

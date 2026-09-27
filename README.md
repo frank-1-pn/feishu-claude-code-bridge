@@ -16,6 +16,10 @@ and private message state stay on the host. Read the [UX implementation](docs/fe
 for implementation and acceptance evidence. Documentation updates do not require
 a subscriber restart or a new subscription.
 
+See [connection heartbeat and recovery](docs/feishu-connection-recovery.md) for
+real ping/pong monitoring, bounded self-healing, invisible scheduled startup and
+scoped network-fault acceptance.
+
 The Claude Code setup below describes the original integration; do not apply its
 Monitor or Claude PID-binding workflow to the Codex bridge.
 

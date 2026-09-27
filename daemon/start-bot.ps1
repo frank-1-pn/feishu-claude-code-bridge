@@ -7,6 +7,13 @@ $pidPath=Join-Path $env:TEMP "lark-$Bot.pid"
 $logPath=Join-Path $env:TEMP "lark-$Bot-events.ndjson"
 $errPath=Join-Path $env:TEMP "lark-$Bot-daemon.err.log"
 $binary=Join-Path $env:APPDATA 'npm/node_modules/@larksuite/cli/bin/lark-cli.exe'
+$runtimePath=Join-Path $PSScriptRoot 'subscriber-runtime.json'
+if(Test-Path -LiteralPath $runtimePath){
+    $runtime=Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $binary=Join-Path $PSScriptRoot 'bin/lark-cli.exe'
+    if((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ine $runtime.binary_sha256){throw 'subscriber binary hash mismatch'}
+}
+$healthPath=Join-Path $env:TEMP "lark-$Bot-ws-health.json"
 # Keep the CLI per-app singleton lock; never use --force.
 $mutex=New-Object Threading.Mutex($false,"Global\LarkSubscriber-$Bot")
 $owned=$false
@@ -24,7 +31,8 @@ try {
     $roots=@($candidates | Where-Object {$_.ParentProcessId -notin @($candidates.ProcessId)})
     if($roots.Count -gt 1){throw 'multiple subscribers for profile; preserve for inspection'}
     if($roots.Count -eq 1){[IO.File]::WriteAllText($pidPath,[string]$roots[0].ProcessId);Write-Output 'adopted existing subscriber';exit 0}
-    & node (Join-Path $PSScriptRoot 'start-lark-append.mjs') $binary $logPath $errPath $pidPath $Profile
+    $networkProbe=Join-Path $PSScriptRoot "state/network-probe-$Bot.json"
+    & node (Join-Path $PSScriptRoot 'start-lark-append.mjs') $binary $logPath $errPath $pidPath $healthPath $networkProbe $Profile
     if($LASTEXITCODE -ne 0){exit 1}
     Start-Sleep -Milliseconds 750
     $started=[int]([IO.File]::ReadAllText($pidPath).Trim())
