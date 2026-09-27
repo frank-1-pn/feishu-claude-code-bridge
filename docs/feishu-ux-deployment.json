@@ -96,12 +96,14 @@
                      "action_pending":  0
                  }
              ],
-    "real_callback_model_ingress":  "pending-user-click",
-    "real_form_submit":  "pending-user-submit",
+    "real_callback_model_ingress":  "verified-bot1-shorter-and-conditions",
+    "real_form_submit":  "verified-bot1",
     "acceptance_cards":  {
                              "sent":  2,
-                             "visible_client_rendering":  "pending-user-verification",
-                             "bot":  "bot1"
+                             "visible_client_rendering":  "user-confirmed-actions-and-replies",
+                             "bot":  "bot1",
+                             "verified_at": "2026-09-27T08:43:35.097Z",
+                             "evidence": "feishu-ux-client-acceptance.json"
                          },
     "deployment_note":  "Initial shell wait was normally interrupted; bounded launcher completed subscriber switch and bridge recovery. No queue or offset restoration was performed."
 }

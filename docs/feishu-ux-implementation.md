@@ -40,6 +40,8 @@
 
 HTML 示例见 `feishu-generated-report-example.html`，手机 390px 与桌面 1280px 均做了渲染和交互检查。真实客户端按钮点击、表单提交、模型入站、最终投递必须另有实际事件与 rollout marker 证明，不能用接口创建成功或 healthy 替代。
 
+2026-09-27 Bot1 实机验收通过：用户点击“再简短一点”并提交两项条件表单，确认收到回复。两次操作各有一条真实回调，均匹配当前绑定会话；直接核验该会话的用户入站 marker、最终答复字节位置对应的 reply key、发送回执与已关闭的最终卡片。按钮返回 90 字符答复，表单返回包含 Markdown 表格的 88 字符答复；两项任务均为 `done`，队列、失败与 watch error 均为 0。脱敏证据见 `feishu-ux-client-acceptance.json`。此实机结论仅覆盖 Bot1 的上述两个操作，其余按钮及 coding profile 保留自动测试和 API 结构验证范围。
+
 应用后台必须配置使用长连接接收 `card.action.trigger`。本地订阅增加过滤项不能自动代替后台配置；CLI 无该配置的预检接口。`status-codex-bridge.ps1` 新增 action accepted/pending/blocked 数量，判活仍以真实入站到目标 thread 为准。
 
 来源：[飞书卡片组件](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-components/component-json-v2-overview)、[卡片回调](https://open.feishu.cn/document/feishu-cards/card-callback-communication)、[CLI v1.0.39 订阅源码](https://github.com/larksuite/cli/blob/v1.0.39/shortcuts/event/subscribe.go)、[SDK v3.5.4 分派器](https://github.com/larksuite/oapi-sdk-go/blob/v3.5.4/event/dispatcher/dispatcher.go)。核查日期 2026-09-27。

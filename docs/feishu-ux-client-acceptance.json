@@ -1,0 +1,94 @@
+{
+  "checked_at": "2026-09-27T08:43:35.097Z",
+  "runtime_revision": "fb073732b15032c2dee45f8041dc6aed24dfef07",
+  "bot": "bot1",
+  "user_confirmation": "User confirmed both acceptance actions were performed and replies received.",
+  "operations": [
+    {
+      "mode": "complete",
+      "action": "shorter",
+      "callback_events": 1,
+      "callback_identity_matches": true,
+      "action_enqueued": true,
+      "status": "done",
+      "bound_thread_matches": true,
+      "accepted_at": "2026-09-27T08:37:48.133Z",
+      "model_ingress_marker_at": "2026-09-27T08:38:00.433Z",
+      "final_answer": {
+        "at": "2026-09-27T08:38:12.389Z",
+        "sha256": "ce5328a1915733fb5a8d8fbfb47e31286549004be55e1c7f6368a75354a730c5",
+        "characters": 90,
+        "has_markdown_table": false,
+        "utf8_replacement_characters": false
+      },
+      "reply_receipt_at": "2026-09-27T08:38:15.064Z",
+      "final_card_delivered": true,
+      "completed_at": "2026-09-27T08:38:15.064Z",
+      "logical_operation_sha256": "6ff53679ba412535bf16240ed555e1ac83154a900c0e188062e567cd478519cb",
+      "reply_key": "a1d36f45b61a580bc617ffea7847c343e9c7934b313ccdac89edd8cb6bd8651f",
+      "passed": true
+    },
+    {
+      "mode": "waiting",
+      "action": "conditions",
+      "callback_events": 1,
+      "callback_identity_matches": true,
+      "action_enqueued": true,
+      "status": "done",
+      "bound_thread_matches": true,
+      "accepted_at": "2026-09-27T08:38:43.864Z",
+      "model_ingress_marker_at": "2026-09-27T08:38:56.423Z",
+      "final_answer": {
+        "at": "2026-09-27T08:39:01.130Z",
+        "sha256": "35bea6abd0e51e8e00317956bbbe1bf674a87e239edf1c7a9da79e620ceaff38",
+        "characters": 88,
+        "has_markdown_table": true,
+        "utf8_replacement_characters": false
+      },
+      "reply_receipt_at": "2026-09-27T08:39:03.515Z",
+      "final_card_delivered": true,
+      "completed_at": "2026-09-27T08:39:03.515Z",
+      "logical_operation_sha256": "19f01a5972489aaa7312f2abbdc73bd8ec49772d3c0932fe8dd36b380c11e1b0",
+      "reply_key": "c4bb0ee477fc2e2a46685800e62298aedd586ba7b903c1e13c0ae4a7065328b5",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "scope": "Bot1 live client shorter button and conditions form only; other buttons and coding profile retain automated/API validation.",
+  "privacy": "No chat, sender, thread IDs, form values, callback tokens, or answer bodies included.",
+  "health": {
+    "checked_at": "2026-09-27T08:44:16.7273516+00:00",
+    "transport_healthy": true,
+    "delivery_healthy": true,
+    "bots": [
+      {
+        "bot": "bot1",
+        "queued_count": 0,
+        "awaiting_delivery_count": 0,
+        "awaiting_reply_count": 0,
+        "reply_pending_count": 0,
+        "failed_count": 0,
+        "watch_error_count": 0,
+        "file_pending_count": 0,
+        "file_failed_count": 0,
+        "action_accepted_count": 2,
+        "action_pending_count": 0,
+        "action_blocked_count": 0
+      },
+      {
+        "bot": "coding",
+        "queued_count": 0,
+        "awaiting_delivery_count": 0,
+        "awaiting_reply_count": 0,
+        "reply_pending_count": 0,
+        "failed_count": 0,
+        "watch_error_count": 0,
+        "file_pending_count": 0,
+        "file_failed_count": 0,
+        "action_accepted_count": 0,
+        "action_pending_count": 0,
+        "action_blocked_count": 0
+      }
+    ]
+  }
+}
