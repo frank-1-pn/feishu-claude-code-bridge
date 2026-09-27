@@ -20,15 +20,16 @@ if($ok){exit 0};exit 1
 `);
   fs.writeFileSync(path.join(dir, 'start-codex-bridge.ps1'), "[IO.File]::AppendAllText((Join-Path $PSScriptRoot 'starts'),'1');exit 0");
   fs.writeFileSync(path.join(dir, 'ensure-bot.ps1'), "throw 'healthy subscriber must not restart'");
-  const script = new URL('./feishu-watchdog.ps1', import.meta.url);
-  execFileSync('powershell.exe', ['-NoProfile', '-File', script.pathname.replace(/^\//, ''), '-RuntimeDir', dir, '-NoAlert'], { timeout: 20000 });
+  const script = path.join(dir, 'feishu-watchdog.ps1');
+  fs.copyFileSync(new URL('./feishu-watchdog.ps1', import.meta.url), script);
+  execFileSync('powershell.exe', ['-NoProfile', '-File', script, '-NoAlert'], { timeout: 20000 });
   assert.equal(fs.readFileSync(path.join(dir, 'starts'), 'utf8'), '1');
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'state/watchdog.json'))).healthy, true);
   // A persistent failure sets a durable cooldown; next invocation only probes.
   fs.writeFileSync(path.join(dir, 'status-codex-bridge.ps1'), "@{healthy=$false;bridge=@{exact_identity=$false;heartbeat_fresh=$false};bots=@(@{bot='fixture';daemon_healthy=$true})}|ConvertTo-Json -Depth 4;exit 1");
-  assert.throws(() => execFileSync('powershell.exe', ['-NoProfile', '-File', script.pathname.replace(/^\//, ''), '-RuntimeDir', dir, '-NoAlert'], { timeout: 30000 }), { status: 1 });
+  assert.throws(() => execFileSync('powershell.exe', ['-NoProfile', '-File', script, '-NoAlert'], { timeout: 30000 }), { status: 1 });
   const starts = fs.readFileSync(path.join(dir, 'starts'), 'utf8');
   assert.equal(starts, '1111');
-  assert.throws(() => execFileSync('powershell.exe', ['-NoProfile', '-File', script.pathname.replace(/^\//, ''), '-RuntimeDir', dir, '-NoAlert'], { timeout: 10000 }), { status: 1 });
+  assert.throws(() => execFileSync('powershell.exe', ['-NoProfile', '-File', script, '-NoAlert'], { timeout: 10000 }), { status: 1 });
   assert.equal(fs.readFileSync(path.join(dir, 'starts'), 'utf8'), starts);
 });

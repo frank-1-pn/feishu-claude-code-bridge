@@ -1,7 +1,8 @@
 # One bounded recovery owner. The Lark subscriber owns socket reconnection;
 # this task only invokes the existing idempotent launchers for failed processes.
 [CmdletBinding()]
-param([string]$RuntimeDir = $PSScriptRoot, [switch]$NoAlert)
+param([string]$RuntimeDir = '', [switch]$NoAlert)
+if (-not $RuntimeDir) { $RuntimeDir = $PSScriptRoot }
 $ErrorActionPreference = 'Stop'
 $env:LARK_CLI_NO_PROXY = '1'
 $env:PATH += ';' + (Join-Path $env:APPDATA 'npm')
