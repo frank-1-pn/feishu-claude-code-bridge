@@ -1,0 +1,107 @@
+{
+    "checked_at":  "2026-09-27T08:29:42.1330247+00:00",
+    "runtime_revision":  "fb073732b15032c2dee45f8041dc6aed24dfef07",
+    "remote_ref_verified":  true,
+    "source":  "git -c core.autocrlf=false archive",
+    "tests":  {
+                  "skipped":  0,
+                  "failed":  0,
+                  "passed":  109
+              },
+    "runtime_hashes_match":  true,
+    "runtime_files":  [
+                          {
+                              "path":  "daemon/codex-bridge-action-ui.mjs",
+                              "sha256":  "7db35830df9c1456492edfc367f2b4ac9d9353ef8f174c0fc086651bc5314caf"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-actions.mjs",
+                              "sha256":  "ab323b4c7e6ba8eaeff63755744c00368e4086dcce3d4b0e1dccc8007509c0f8"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-cardkit.mjs",
+                              "sha256":  "2081ffc7d48c77ade3184cc7d423a5a028822e80734652d22006e6d9345c3de9"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-delivery.mjs",
+                              "sha256":  "c9afd165846e27411690c0987bb638b1e3828023dc84890aaeeff2276628c917"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-files.mjs",
+                              "sha256":  "8ba07debca40901246181cedb11d5b232aecd81588b80ac1be95dcfd7b343448"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-inbox.mjs",
+                              "sha256":  "14c6804dd5b468cd681b122c6248c888fb7e36407a5cfb550f50f3dbc0151f46"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-outbound.mjs",
+                              "sha256":  "7bdb2152d10ccf1aced6d2bca028022972f56958edc51afa499c849ff79cf670"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-presentation.mjs",
+                              "sha256":  "df5adff01efc5a43f68cbd43e8ea6ef29decdb460f28b5b1253a1b41b5b33fb6"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-report.mjs",
+                              "sha256":  "25ae29c598b8cfdd4812de45d6338abf87b3b7c213b4bb0346b0dfc7b80691df"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-ux.mjs",
+                              "sha256":  "10c8cac644a1d1752b1517c9eed4351103e594a4ec98455ee5139322c24b5fa7"
+                          },
+                          {
+                              "path":  "daemon/codex-bridge-worker.mjs",
+                              "sha256":  "096fbd97f0e6ed4ab9176beb9edccf61805aa2c88afe3a21ddebaec968bcf901"
+                          },
+                          {
+                              "path":  "daemon/start-lark-append.mjs",
+                              "sha256":  "046fd8e2999c819f82ec9a46295161edfe889093e8d0b752ad76390b03db0638"
+                          },
+                          {
+                              "path":  "daemon/status-codex-bridge.ps1",
+                              "sha256":  "a95fc2e8f55c0f68a382e4c07b74a15f2b0c6b5bca36a7d7667251de7b85036f"
+                          }
+                      ],
+    "bindings_preserved":  true,
+    "backup":  "C:\\Users\\ke\\.lark-cli\\daemon\\backups\\ux-20260927-162345",
+    "transport_healthy":  true,
+    "delivery_healthy":  true,
+    "bridge_pid":  59876,
+    "bots":  [
+                 {
+                     "bot":  "bot1",
+                     "subscriber_pid":  57380,
+                     "callbacks_filter_enabled":  true,
+                     "inbox_jobs":  3,
+                     "callback_jobs":  0,
+                     "queued":  0,
+                     "awaiting_reply":  0,
+                     "failed":  0,
+                     "watch_errors":  0,
+                     "action_accepted":  0,
+                     "action_pending":  0
+                 },
+                 {
+                     "bot":  "coding",
+                     "subscriber_pid":  62104,
+                     "callbacks_filter_enabled":  true,
+                     "inbox_jobs":  12,
+                     "callback_jobs":  0,
+                     "queued":  0,
+                     "awaiting_reply":  0,
+                     "failed":  0,
+                     "watch_errors":  0,
+                     "action_accepted":  0,
+                     "action_pending":  0
+                 }
+             ],
+    "real_callback_model_ingress":  "pending-user-click",
+    "real_form_submit":  "pending-user-submit",
+    "acceptance_cards":  {
+                             "sent":  2,
+                             "visible_client_rendering":  "pending-user-verification",
+                             "bot":  "bot1"
+                         },
+    "deployment_note":  "Initial shell wait was normally interrupted; bounded launcher completed subscriber switch and bridge recovery. No queue or offset restoration was performed."
+}
