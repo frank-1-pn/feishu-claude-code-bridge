@@ -1198,7 +1198,7 @@ async function durableBotLoops(binding) {
     send: (text,key,context) => outbound.text(text,key,getRoute(context)),
     final,
     progress: (text,key,context) => outbound.progress(text,key,getRoute({jobId:context?.jobId,
-      jobs:[...inbox.jobs.values()].filter(job=>job.streamKey===key)})),
+      jobs:[...inbox.jobs.values()].filter(job=>job.streamKey===key)}),context),
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
   // Private pending jobs are tied to the originating mapping. Rebinding a bot

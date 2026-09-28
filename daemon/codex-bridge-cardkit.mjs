@@ -7,6 +7,7 @@ import { buildPresentation, markdownElements, sourceMarkdown, safeHttpUrl } from
 // serialized latest-snapshot/final-drain design. No model reasoning is accepted.
 export function streamCard(text, final, options = {}) {
   const view = buildPresentation(text, { ...options, final });
+  const streaming=!final && options.streaming!==false;
   const panel = (id, title, elements) => ({ tag:'collapsible_panel', element_id:id, expanded:false,
     header:{title:{tag:'plain_text',content:title}}, elements });
   const answerElements=markdownElements(view.answer,'answer');
@@ -18,7 +19,7 @@ export function streamCard(text, final, options = {}) {
   else if(options.cloudDoc?.status==='blocked')elements.push({tag:'markdown',element_id:'cloud_doc',content:'飞书云文档暂未生成，完整内容请查看原始报告附件。'});
   if(view.detailText) elements.push(panel('details','完整答复',markdownElements(view.detailText)));
   if(view.sources.length) elements.push(panel('sources','来源与依据',[{tag:'markdown',element_id:'source_list',content:sourceMarkdown(view.sources)}]));
-  if(view.publicProgress.length) elements.push(panel('progress','公开进度（最近记录）',markdownElements(view.publicProgress.join('\n\n---\n\n'),'progress_text')));
+  if(view.publicProgress.length) elements.push(panel('progress','公开进度（北京时间，最近记录）',markdownElements(view.publicProgress.join('\n\n---\n\n'),'progress_text')));
   if(view.report) {
     const name=view.report.fileName.replace(/[<>]/g,'').replace(/([\\`*_{}\[\]()#+.!|~])/g,'\\$1');
     const label=view.report.delivered?'完整报告已作为附件发送':'完整报告尚未确认送达';
@@ -27,8 +28,8 @@ export function streamCard(text, final, options = {}) {
   // Interactive components are supplied only by the trusted action builder.
   // Forms stay top-level: Feishu does not allow form inside collapsible_panel.
   if(final && Array.isArray(options.interactions)) elements.push(...options.interactions);
-  return { schema:'2.0', config:{update_multi:true,streaming_mode:!final,width_mode:'fill',summary:{content:view.summary},enable_forward_interaction:false,
-    ...(final ? {} : {streaming_config:{print_frequency_ms:{default:70},print_step:{default:3},print_strategy:'fast'}})},
+  return { schema:'2.0', config:{update_multi:true,streaming_mode:streaming,width_mode:'fill',summary:{content:view.summary},enable_forward_interaction:false,
+    ...(streaming ? {streaming_config:{print_frequency_ms:{default:70},print_step:{default:3},print_strategy:'fast'}} : {})},
     header:{template:view.state==='error'?'red':view.state==='waiting'?'orange':final?'green':'blue',title:{tag:'plain_text',content:view.status}},
     body:{elements} };
 }
@@ -118,7 +119,7 @@ export async function updateStreamCard({file,s,final,binding,request,now,onMessa
     }
     // A partially applied collection of element changes is not a delivered
     // revision. Recovery resumes the remaining operations before newer output.
-    if(completed){latest.sentRevision=operation.revision;latest.lastSentAt=now();latest.retryAt=0;latest.attempts=0;}
+    if(completed){latest.sentRevision=operation.revision;latest.lastSentAt=now();latest.retryAt=0;latest.attempts=0;delete latest.error;delete latest.blocked;}
     if(operation.final)latest.cardClosed=true;
     atomicWriteJson(file,latest);return latest;
   };
@@ -127,14 +128,32 @@ export async function updateStreamCard({file,s,final,binding,request,now,onMessa
       const operation=current.cardPending??current.cardBatch.operations[current.cardBatch.next];
       if(!operation)throw Error('card_batch_journal_invalid');
       if(!current.cardPending)current=merge({cardPending:operation});
-      current=await apply(operation);
+      try { current=await apply(operation); }
+      catch(error) {
+        const code=String(error.apiCode??error.code??'');
+        if(!['300309','200850'].includes(code) || !/\/elements\/[^/]+\/content$/.test(operation.endpoint))throw error;
+        // The element request was rejected because the remote stream is closed.
+        // Replace its remaining batch with a newer full snapshot on THE SAME
+        // entity. Persist a new sequence/UUID before I/O; uncertain full updates
+        // then replay identically after restart, without another visible card.
+        const latest=read(), sequence=Math.max(latest.cardSequence??0,operation.sequence,
+          ...(latest.cardBatch?.operations??[]).map(op=>op.sequence))+1;
+        if(sequence>2147483647)throw Object.assign(Error('card_sequence_exhausted'),{permanent:true});
+        const closing=Boolean(latest.final),revision=latest.revision;
+        const targetCard=streamCard(latest.text,closing,{...latest.presentation,streaming:false});
+        const replacement={sequence,revision,final:closing,endpoint:`/open-apis/cardkit/v1/cards/${latest.cardId}`,
+          body:{uuid:digest(`${latest.key}:stream-fallback:${sequence}`).slice(0,40),sequence,card:{type:'card_json',data:JSON.stringify(targetCard)}}};
+        current=merge({cardStreamingFallback:true,cardStreamingFallbackCode:code,
+          cardBatch:{revision,final:closing,targetCard,operations:[replacement],next:0},cardPending:replacement});
+      }
     }
   };
   await drain();
   // A finalized card must never reopen because of a stale progress snapshot.
   if((current.cardClosed || current.final) && !final)return;
-  if(current.sentRevision===s.revision && (!final || current.cardClosed))return;
-  const targetCard=final || s.presentation?streamCard(s.text,final,s.presentation):null;
+  if(current.sentRevision>=s.revision && (!final || current.cardClosed))return;
+  const targetCard=final || s.presentation || current.cardStreamingFallback
+    ?streamCard(s.text,final,{...s.presentation,streaming:!current.cardStreamingFallback}):null;
   // Preserve the original no-presentation adapter, including raw answer text.
   const plan=targetCard?planCardUpdate(current.lastAppliedCard,targetCard,{final}):{mode:'elements',updates:[{elementId:'answer',content:s.text}]};
   if(plan.mode==='none'){

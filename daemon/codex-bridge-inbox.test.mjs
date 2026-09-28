@@ -106,3 +106,42 @@ test('rejects invalid IDs and preserves corrupt queue evidence instead of droppi
   f.q.enqueue(event('a'));const file=fs.readdirSync(path.join(f.root,'test')).find(n=>n.startsWith('job-'));
   fs.writeFileSync(path.join(f.root,'test',file),'{');assert.throws(()=>f.open());
 });
+
+test('long tasks renew inactivity from public progress and tool calls, including across restart',async t=>{
+  const f=fixture(t);f.q.enqueue(event('active'));await f.q.dispatchOne();f.append(marker('active'));await f.q.watch();
+  for(const [time,payload] of [[1800,{type:'function_call',name:'exec'}],[2600,{type:'function_call_output',output:'private tool data'}]]){
+    f.setNow(time);f.append({timestamp:new Date(time).toISOString(),type:'response_item',payload});await f.q.watch();await f.q.deliverReplies();
+  }
+  const q=f.open();f.setNow(3400);f.append({...answer('继续验收','commentary'),timestamp:new Date(3400).toISOString()});await q.watch();await q.deliverReplies();
+  assert.equal(f.sent.length,0);assert.equal(q.jobs.get('om_active').lastActivityAt,3400);
+  f.setNow(4501);await q.watch();await q.deliverReplies();await q.watch();await q.deliverReplies();
+  assert.equal(f.sent.length,1);assert.match(f.sent[0].text,/未观察到新的执行活动/);
+  f.append(answer('完成'));await q.watch();await q.deliverReplies();assert.equal(f.injected.length,1);assert.equal(q.stats().completed_count,1);
+});
+
+test('housekeeping and reasoning do not hide inactivity; replay uses event time instead of scan time',async t=>{
+  const f=fixture(t);f.q.enqueue(event('quiet'));await f.q.dispatchOne();
+  f.append(marker('quiet'),{...answer('旧进度','commentary'),timestamp:new Date(1100).toISOString()});f.setNow(3000);
+  f.append({timestamp:new Date(3000).toISOString(),type:'event_msg',payload:{type:'token_count'}},
+    {...answer('never publish','analysis'),timestamp:new Date(3000).toISOString()});
+  await f.q.watch();await f.q.deliverReplies();assert.equal(f.sent.length,1);assert.equal(f.q.jobs.get('om_quiet').lastActivityAt,1100);
+});
+
+test('resumed activity cancels an unsent stale notice and permits a later genuine inactivity warning',async t=>{
+  const f=fixture(t);f.q.enqueue(event('resume'));await f.q.dispatchOne();f.append(marker('resume'));await f.q.watch();
+  f.setNow(2200);await f.q.watch();assert.ok(f.q.jobs.get('om_resume').notice);
+  f.setNow(2400);f.append({...answer('恢复执行','commentary'),timestamp:new Date(2400).toISOString()});await f.q.watch();await f.q.deliverReplies();
+  assert.equal(f.sent.length,0);assert.equal(f.q.jobs.get('om_resume').timeoutNotified,false);
+  f.setNow(3501);await f.q.watch();await f.q.deliverReplies();assert.equal(f.sent.length,1);
+});
+
+test('all commentary events in a scan retain original times and byte positions; old events use observation time explicitly',async t=>{
+  const progress=[];const f=fixture(t,{progress:async(text,key,context)=>progress.push({text,...context})});
+  f.q.enqueue(event('times'));await f.q.dispatchOne();f.setNow(9000);
+  f.append(marker('times'),{...answer('一','commentary'),timestamp:new Date(1500).toISOString()},
+    {...answer('二','commentary'),timestamp:new Date(2500).toISOString()},answer('旧格式','commentary'));
+  await f.q.watch();assert.deepEqual(progress.map(p=>p.at),[1500,2500,null]);
+  assert.deepEqual(progress.map(p=>p.observedAt),[9000,9000,9000]);
+  assert.ok(progress.every((p,i)=>!i||p.position>progress[i-1].position));
+  const q=f.open();await q.watch();assert.equal(progress.length,3);
+});

@@ -51,7 +51,7 @@ bridge 的线程推进有两条互斥路径：目标 thread 已被 Orca/Codex �
 
 不要直接用 terminal daemon 的 raw `write` 模拟正文 + 回车：它没有 key-event 语义，连续写入可能把消息留在 composer。普通消息统一走 Orca 的 agent-prompt 接口；它在后台 daemon 内完成 bracketed paste、Windows ConPTY 1500ms settle delay 和提交，不依赖窗口焦点或屏幕点亮。超过 Windows argv 安全长度的消息才允许 raw bracketed paste，但最终 Enter 仍走 `orca terminal send --enter`。这条路径是 Codex 当前的兼容实现，不得描述成 Claude 官方 `claude/channel`：Codex 尚无能把 MCP notification 原生推进既有会话的 channel capability。
 
-Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runtime 已经接受并排队 agent prompt。此时不能立刻向飞书发失败提示；以 rollout 中带 `message_id` 的 user marker 为入站权威，并等待对应最终答复。marker 等待超时表示尚未确认入站；已有 marker 后等待 final 超时表示答复迟到，不能倒推成注入失败或重投任务。
+Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runtime 已经接受并排队 agent prompt。此时不能立刻向飞书发失败提示；以 rollout 中带 `message_id` 的 user marker 为入站权威，并等待对应最终答复。marker 等待超时表示尚未确认入站；已有 marker 后按最近公开进度或工具调用/返回的事件时间判断无活动时长，默认连续 30 分钟无活动才提醒，不能倒推成注入失败或重投任务。token 计数、文件更新时间和隐藏思考不用于延后提醒。
 
 匹配 chat 与 sender 白名单的事件先保存到 `daemon/state/codex-inbox-v2/<bot>/` 再推进 codex offset。常规消息、按钮和表单受理成功后不发“已保存／正在投递”回执，保留公开进度、最终答复与异常提示。每条记录区分 queued、submitted、delivered、reply_pending、done、failed。投递前记录 submitted；CLI 超时先核对 rollout，不自动重投。重启按记录继续。原始正文与附件目录属于私有运行状态，不可提交 Git。
 
@@ -60,6 +60,8 @@ Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runt
 rollout 观察只转发显式 commentary 与 final/final_answer 或 task_complete 的最终文本，reasoning 永不外发。公开进度卡片按至少 2 秒节流更新，布局不变时只更新变化的文本元素；仍是公开快照，不是逐 token 流式输出。同一轮消费的多条输入共享一次最终回包；不同轮分别回包。出站分片使用稳定 Feishu idempotency key，网络重试不重新执行模型任务。投递或答复超时明确提示并继续观察迟到结果。
 
 不要把旧 Claude Monitor task ID、`TaskList` 或 `binding-<claude_pid>` 当作 Codex bridge 的判活依据。旧 binding 仍为 hooks 路由保留；bridge 使用自己的 thread mapping 与 offset。
+
+公开进度的最近记录显示事件原始北京时间；缺少事件时间但有接收时间时明确标注“接收时间”，历史两者均缺失则标注“时间未记录”。CardKit 返回 `300309` 或 `200850` 时，在同一张卡片上持久切换为普通整卡更新，保留严格递增序号和重试去重；不重新创建消息，也不反复重试已关闭的流式文本接口。
 
 ## 收发规范
 

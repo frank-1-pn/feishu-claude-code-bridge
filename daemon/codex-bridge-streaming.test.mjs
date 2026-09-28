@@ -133,3 +133,68 @@ test('unchanged answer does not resend while separate visible progress changes',
   await f.update({ revision: 2, presentation: presentation('two') });
   assert.equal(f.calls.length, offset + 1); assert.match(f.calls.at(-1)[2], /\/elements\/progress_text_0\/content$/);
 });
+
+for(const code of ['300309','200850'])test(`closed stream ${code} recovers the same card as a non-streaming snapshot`,async t=>{
+  const f=fixture(t);await f.update({key:'turn',revision:1,text:'one',presentation:presentation('one')});
+  f.hook(async args=>{if(args[2].includes('/elements/'))throw Object.assign(Error('stream closed'),{apiCode:code});});
+  await f.update({revision:2,text:'two',presentation:presentation('two')});
+  const recovered=f.read();assert.equal(recovered.sentRevision,2);assert.equal(recovered.cardStreamingFallback,true);
+  assert.equal(recovered.cardStreamingFallbackCode,code);assert.equal(recovered.lastAppliedCard.config.streaming_mode,false);
+  assert.equal(recovered.cardPending,undefined);assert.equal(recovered.cardBatch,undefined);
+  const count=f.calls.length;await f.update({revision:3,text:'three',presentation:presentation('three')});
+  assert.equal(f.calls.length,count+1);assert.ok(JSON.parse(f.calls.at(-1).at(-1)).card);
+  await f.update({revision:4,text:'final',final:true,presentation:{status:'complete'}},true);
+  assert.equal(f.read().cardClosed,true);assert.equal(f.calls.filter(a=>a[1]==='POST').length,2);
+});
+
+test('fallback journal survives an uncertain full update and replays exact UUID/sequence after restart',async t=>{
+  const f=fixture(t);await f.update({key:'turn',revision:1,text:'one',presentation:presentation('one')});let uncertain;
+  f.hook(async args=>{
+    if(args[2].includes('/elements/'))throw Object.assign(Error('closed'),{apiCode:300309});
+    if(args[1]==='PUT'&&!uncertain){uncertain=structuredClone(args);throw Error('ack lost');}
+  });
+  await assert.rejects(f.update({revision:2,text:'two',presentation:presentation('two')}),/ack lost/);
+  assert.equal(f.read().sentRevision,1);assert.deepEqual(f.read().cardPending.body,JSON.parse(uncertain.at(-1)));
+  const offset=f.calls.length;await f.update({revision:3,text:'three',presentation:presentation('three')});
+  assert.deepEqual(f.calls[offset],uncertain);assert.equal(f.read().sentRevision,3);
+  assert.equal(f.read().lastAppliedCard.body.elements[1].content,'three');
+});
+
+test('closed legacy element journal goes straight to latest final without draining obsolete progress',async t=>{
+  const f=fixture(t);const pending={sequence:6,revision:4,final:false,endpoint:'/open-apis/cardkit/v1/cards/card_fixture/elements/answer/content',body:{sequence:6,uuid:'old',content:'old'}};
+  f.write({key:'turn',cardId:'card_fixture',messageId:'om_fixture',cardSequence:5,cardPending:pending,cardBatch:{revision:4,operations:[pending,{...pending,sequence:7,body:{...pending.body,sequence:7,uuid:'old2'}}],next:0},revision:10,text:'最新最终答案',final:true,presentation:{status:'complete'}});
+  f.hook(async args=>{if(args[2].includes('/elements/'))throw Object.assign(Error('closed'),{apiCode:300309});});
+  await updateStreamCard({file:f.file,s:f.read(),final:true,binding:f.binding,request:f.request,now:()=>100000});
+  assert.equal(f.calls.length,2);const last=JSON.parse(f.calls.at(-1).at(-1));assert.equal(last.sequence,8);
+  assert.equal(JSON.parse(last.card.data).body.elements[1].content,'最新最终答案');assert.equal(f.read().sentRevision,10);assert.equal(f.read().cardClosed,true);
+});
+
+test('recovery uses newer queued progress and never reverts to the caller old snapshot',async t=>{
+  const f=fixture(t);await f.update({key:'turn',revision:1,text:'one',presentation:presentation('one')});
+  let changed=false;f.hook(async args=>{if(args[2].includes('/elements/')){
+    if(!changed){changed=true;f.write({...f.read(),revision:8,text:'newest',presentation:presentation('newest')});}
+    throw Object.assign(Error('closed'),{apiCode:300309});
+  }});
+  await f.update({revision:2,text:'old',presentation:presentation('old')});
+  assert.equal(f.read().sentRevision,8);assert.equal(f.read().lastAppliedCard.body.elements[1].content,'newest');
+});
+
+test('permission and unknown transport errors retain pending operations without recovery writes',async t=>{
+  const f=fixture(t);await f.update({key:'turn',revision:1,text:'one',presentation:presentation('one')});
+  f.hook(async args=>{if(args[2].includes('/elements/'))throw Object.assign(Error('permission'),{apiCode:99991672});});
+  const count=f.calls.length;await assert.rejects(f.update({revision:2,text:'two',presentation:presentation('two')}));
+  assert.equal(f.calls.length,count+1);assert.equal(f.read().cardStreamingFallback,undefined);assert.ok(f.read().cardPending);
+});
+
+test('progress timestamps survive restart and replayed offsets cannot duplicate or regress history',async t=>{
+  const f=fixture(t);const make=()=>new DurableOutbound(f.root,f.binding,f.request,{presentationEnabled:true,now:()=>Date.parse('2026-09-28T12:00:00Z')});
+  let out=make();const at=Date.parse('2026-09-28T11:52:22Z');
+  out.progress('事件一','turn',undefined,{at,observedAt:at+60000,position:100});
+  out.progress('事件二','turn',undefined,{at:at+1000,position:200});out=make();
+  out.progress('事件一','turn',undefined,{at,position:100});out.progress('事件二','turn',undefined,{at:at+1000,position:200});
+  const state=out.read(out.file('card','turn'));assert.equal(state.presentation.publicProgress.length,2);assert.equal(state.revision,2);
+  const card=streamCard(state.text,false,state.presentation);const encoded=JSON.stringify(card);
+  assert.match(encoded,/09-28 19:52:22/);assert.match(encoded,/09-28 19:52:23/);assert.doesNotMatch(encoded,/20:00:00/);
+  assert.match(encoded,/北京时间/);
+  assert.match(JSON.stringify(streamCard('旧',false,presentation('旧记录'))),/时间未记录/);
+});

@@ -51,16 +51,21 @@ export class DurableOutbound {
       }
     });
   }
-  progress(text, key, route) {
+  progress(text, key, route, metadata = {}) {
     const file = this.file('card', key);
     const s = this.read(file, { key, revision: 0, ...(route?{route}:{}) });
     if (s.final) return;
+    const positioned=Number.isSafeInteger(metadata.position) && metadata.position>=0;
+    if(positioned && metadata.position<=(s.progressPosition??-1))return;
     const clean = sanitizeFeishuReply(text).trim();
-    if (!clean || s.text === clean) return;
+    if (!clean || (!positioned && s.text === clean)) return;
     if (this.presentationEnabled) {
-      const history = [...(s.presentation?.publicProgress ?? []), {channel:'commentary', text:splitText(clean,4000)[0]}].slice(-6);
+      const at=Number.isFinite(metadata.at) && metadata.at>=0?metadata.at:null;
+      const observedAt=Number.isFinite(metadata.observedAt)?metadata.observedAt:this.now();
+      const history = [...(s.presentation?.publicProgress ?? []), {channel:'commentary', text:splitText(clean,4000)[0],at,observedAt}].slice(-6);
       s.presentation = {...s.presentation, status:publicPhase(clean), publicProgress:history};
     }
+    if(positioned)s.progressPosition=metadata.position;
     s.text = splitText(clean, 16000)[0];
     if(s.presentation) {
       // Full-card updates include sources and history. Budget their actual JSON,

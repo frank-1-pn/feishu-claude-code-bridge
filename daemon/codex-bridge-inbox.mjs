@@ -8,6 +8,15 @@ import { recordFailure } from './codex-bridge-retry.mjs';
 export const digest = (s) => createHash('sha256').update(s).digest('hex');
 export const atomicJson = atomicWriteJson;
 
+// Only execution/public-message metadata renews the inactivity timer. Token
+// counters, file mtimes and hidden reasoning are not evidence of task progress.
+const executionActivity = item => item?.type === 'response_item'
+  && ['function_call','function_call_output','custom_tool_call','custom_tool_call_output'].includes(item.payload?.type);
+const eventTime = (item, now) => {
+  const value = typeof item.timestamp === 'string' ? Date.parse(item.timestamp) : NaN;
+  return Number.isFinite(value) && value >= 0 && value <= now ? value : null;
+};
+
 export function normalizeEvent(event) {
   const type = event.message_type;
   const raw = typeof event.content === 'string' ? event.content : JSON.stringify(event.content ?? {});
@@ -126,13 +135,25 @@ export class DurableInbox {
       }
       if (!j.markerSeen) continue;
       const message = rolloutAssistantMessage(item);
+      const observedAt=this.now(), at=eventTime(item,observedAt);
+      if(message || executionActivity(item)) {
+        const activityAt=Math.max(j.lastActivityAt??j.submittedAt,at??observedAt);
+        j.lastActivityAt=activityAt;
+        if(j.timeoutNotified && activityAt>(j.timeoutNotifiedAt??j.submittedAt+this.timeoutMs)) {
+          j.timeoutNotified=false;delete j.timeoutNotifiedAt;
+          if(j.timeoutNotice && j.notice===j.timeoutNotice){delete j.notice;delete j.noticeRetry;}
+        }
+      }
       if (message?.phase === 'commentary') {
         j.streamKey = digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}`);
-        j.pendingProgress = { text: message.text, key: j.streamKey };
+        const progress={text:message.text,key:j.streamKey,at,observedAt,position:absoluteEnd};
+        const prior=j.pendingProgress?.events??(j.pendingProgress?[j.pendingProgress]:[]);
+        j.pendingProgress={...progress,events:[...prior,progress].slice(-12)};
       }
       const completion = rolloutTaskCompletion(item);
       if (message?.phase === 'final_answer' || completion?.kind === 'final') {
         j.status = 'reply_pending'; j.reply = message?.text ?? completion.text;
+        if(j.timeoutNotice && j.notice===j.timeoutNotice){delete j.notice;delete j.noticeRetry;}
         // All steer messages consumed by one turn share exactly one outbox key.
         j.replyKey = digest(`${this.bot}\0${j.rollout}\0${absoluteEnd}`);
         break;
@@ -154,15 +175,20 @@ export class DurableInbox {
         if(j.error==='rollout_read_failed'){delete j.error;this.save(j);}
       } catch { j.error = 'rollout_read_failed'; this.save(j); }
       // Timed-out jobs remain watched; late delivery/final may still arrive.
-      if (['submitted','delivered'].includes(j.status) && this.now() - j.submittedAt > this.timeoutMs && !j.timeoutNotified) {
-        j.notice = j.markerSeen ? '消息已送入 Codex，但答复等待超时；仍在跟踪，不会重复执行。' : '消息已保存，但尚未确认进入 Codex；仍在跟踪，请查看桌面会话状态。';
+      const activityAt=j.markerSeen?(j.lastActivityAt??j.submittedAt):j.submittedAt;
+      const caughtUp=fs.statSync(j.rollout,{throwIfNoEntry:false})?.size===j.cursor;
+      if (caughtUp && ['submitted','delivered'].includes(j.status) && this.now() - activityAt > this.timeoutMs && !j.timeoutNotified) {
+        const minutes=Math.max(1,Math.round(this.timeoutMs/60000));
+        j.notice = j.markerSeen ? `Codex 已收到消息，但连续 ${minutes} 分钟未观察到新的执行活动或公开进度；仍在跟踪，任务未自动取消，也不会重复执行。` : '消息已保存，但尚未确认进入 Codex；仍在跟踪，请查看桌面会话状态。';
+        j.timeoutNotice=j.notice;j.timeoutNotifiedAt=this.now();
         j.timeoutNotified = true; this.save(j);
       }
     }
     for (const j of this.jobs.values()) {
       if (!j.pendingProgress) continue;
       try {
-        await this.io.progress?.(j.pendingProgress.text, j.pendingProgress.key, {jobId:j.id,job:j});
+        for(const progress of j.pendingProgress.events??[j.pendingProgress])
+          await this.io.progress?.(progress.text,progress.key,{jobId:j.id,job:j,at:progress.at,observedAt:progress.observedAt,position:progress.position});
         delete j.pendingProgress; this.save(j);
       } catch { /* Saved snapshot is retried after restart. */ }
     }

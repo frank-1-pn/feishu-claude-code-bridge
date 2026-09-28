@@ -126,6 +126,15 @@ function extractPreview(text, suppliedSummary) {
  * verification/inference labels remain the author's own words. Progress must
  * be explicitly tagged commentary; a reasoning/analysis item is rejected.
  */
+export function progressTimeLabel(item) {
+  const source=Number.isFinite(item.at)?item.at:null;
+  const value=source??(Number.isFinite(item.observedAt)?item.observedAt:null);
+  if(value===null || value<0 || !Number.isFinite(new Date(value).getTime()))return '时间未记录';
+  const parts=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(value));
+  const part=type=>parts.find(p=>p.type===type).value;
+  return `${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}${source===null?'（接收时间）':''}`;
+}
+
 export function buildPresentation(value, options = {}) {
   const fullText = String(value ?? '');
   const final = Boolean(options.final);
@@ -137,7 +146,8 @@ export function buildPresentation(value, options = {}) {
   let answer = decoratedPreview.trim() ? decoratedPreview : (final ? '本次没有可发送的正文。' : '正在处理…');
   const publicProgress = (Array.isArray(options.publicProgress) ? options.publicProgress : [])
     .filter(item => item && item.channel === 'commentary' && typeof item.text === 'string' && item.text.trim())
-    .map(item => item.text.trim()).filter((text, index, items) => index === 0 || text !== items[index - 1]).slice(-12);
+    .map(item => `**${progressTimeLabel(item)}**\n\n${item.text.trim()}`)
+    .filter((text, index, items) => index === 0 || text !== items[index - 1]).slice(-12);
   const report = options.report && typeof options.report.fileName === 'string' ? {
     fileName: options.report.fileName.replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 160),
     delivered: options.report.delivered === true,
