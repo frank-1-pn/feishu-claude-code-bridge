@@ -23,7 +23,7 @@ function parseArgs(argv) {
 }
 
 function findDaemonEndpoint() {
-  const runtimeDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'orca', 'daemon');
+  const runtimeDir = process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support', 'orca', 'daemon') : path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'orca', 'daemon');
   const candidates = fs.readdirSync(runtimeDir)
     .map((name) => /^daemon-v(\d+)\.pid$/.exec(name))
     .filter(Boolean)
@@ -39,7 +39,7 @@ function findDaemonEndpoint() {
   return {
     version,
     token,
-    socketPath: `\\\\?\\pipe\\orca-terminal-host-v${version}-${suffix}`,
+    socketPath: process.platform === 'darwin' ? path.join(runtimeDir, `daemon-v${version}.sock`) : `\\\\?\\pipe\\orca-terminal-host-v${version}-${suffix}`,
   };
 }
 

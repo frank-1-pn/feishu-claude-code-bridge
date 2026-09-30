@@ -48,7 +48,7 @@ import { UX_PROMPT, bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
-const TEMP_DIR = os.tmpdir();
+const TEMP_DIR = process.platform === 'darwin' ? fs.realpathSync(os.tmpdir()) : os.tmpdir();
 const STATE_DIR = path.join(TEMP_DIR, 'lark-codex-bridge');
 const LOCK_PATH = path.join(TEMP_DIR, 'lark-codex-bridge.lock');
 const PID_PATH = path.join(TEMP_DIR, 'lark-codex-bridge.pid.json');
@@ -62,7 +62,7 @@ const PROGRESS_MIN_INTERVAL_MS = 2000;
 const PROGRESS_MAX_MESSAGES = 8;
 const PROGRESS_MAX_CHARACTERS = 1800;
 const ORCA_PTY_RPC_PATH = path.join(DAEMON_DIR, 'orca-pty-rpc.mjs');
-const RESOLVE_CODEX_PTY_PATH = path.join(DAEMON_DIR, 'resolve-codex-pty.ps1');
+const RESOLVE_CODEX_PTY_PATH = path.join(DAEMON_DIR, process.platform === 'darwin' ? 'resolve-codex-pty.mjs' : 'resolve-codex-pty.ps1');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function parseArgs(argv) {
@@ -108,6 +108,7 @@ function loadAndValidateConfig(bindingsPath) {
   assertFile(config.runtime.codex_cli_js, 'runtime.codex_cli_js');
   assertFile(config.runtime.orca_cli_exe, 'runtime.orca_cli_exe');
   assertFile(config.runtime.lark_send_script, 'runtime.lark_send_script');
+  if (process.platform === 'darwin') assertFile(config.runtime.lark_cli_exe, 'runtime.lark_cli_exe');
   assertFile(ORCA_PTY_RPC_PATH, 'Orca PTY RPC helper');
   assertFile(RESOLVE_CODEX_PTY_PATH, 'Codex PTY resolver');
   if (!Number.isInteger(config.runtime.poll_interval_ms) || config.runtime.poll_interval_ms < 250) {
@@ -144,7 +145,7 @@ function loadAndValidateConfig(bindingsPath) {
     if (profiles.has(binding.profile)) throw new Error(`${bot}: one runtime binding per Lark profile is required`);
     profiles.add(binding.profile);
     binding.bot = bot;
-    binding.logPath = path.join(TEMP_DIR, `lark-${bot}-events.ndjson`);
+    binding.logPath = process.platform === 'darwin' ? path.join(DAEMON_DIR, 'state', 'events', `${bot}.ndjson`) : path.join(TEMP_DIR, `lark-${bot}-events.ndjson`);
     binding.offsetPath = path.join(TEMP_DIR, `lark-${bot}-codex.offset`);
     binding.receiptOffsetPath = path.join(TEMP_DIR, `lark-${bot}-codex-receipt.offset`);
   }
@@ -517,14 +518,8 @@ async function waitForRolloutFinal(rolloutPath, startOffset, messageId, onCommen
 }
 
 async function resolveActivePty(binding) {
-  const result = await runChildCapture('powershell.exe', [
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-File', RESOLVE_CODEX_PTY_PATH,
-    '-ThreadId', binding.codex_thread_id,
-    '-CodexHome', config.runtime.codex_home,
-    '-RpcScript', ORCA_PTY_RPC_PATH,
-  ], { cwd: DAEMON_DIR });
+  const args = process.platform === 'darwin' ? [RESOLVE_CODEX_PTY_PATH, '--thread-id', binding.codex_thread_id, '--codex-home', config.runtime.codex_home, '--rpc-script', ORCA_PTY_RPC_PATH] : ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', RESOLVE_CODEX_PTY_PATH, '-ThreadId', binding.codex_thread_id, '-CodexHome', config.runtime.codex_home, '-RpcScript', ORCA_PTY_RPC_PATH];
+  const result = await runChildCapture(process.platform === 'darwin' ? process.execPath : 'powershell.exe', args, { cwd: DAEMON_DIR });
   const resolved = JSON.parse(result.stdout.trim());
   if (resolved.ok !== true) throw new Error(`pty_resolve_failed:${resolved.error ?? 'unknown'}`);
   return resolved.active_writer === true ? resolved : null;
@@ -686,15 +681,9 @@ async function sendReply(binding, replyPath) {
       afterBytes: Buffer.byteLength(sanitizedReply, 'utf8'),
     });
   }
-  const args = [
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-File', config.runtime.lark_send_script,
-    '-TextFile', replyPath,
-    '-ChatId', binding.chat_id,
-  ];
-  if (binding.profile) args.push('-Profile', binding.profile);
-  await runChild('powershell.exe', args, {
+  const args = process.platform === 'darwin' ? [config.runtime.lark_send_script, '--text-file', replyPath, '--chat-id', binding.chat_id] : ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', config.runtime.lark_send_script, '-TextFile', replyPath, '-ChatId', binding.chat_id];
+  if (binding.profile) args.push(process.platform === 'darwin' ? '--profile' : '-Profile', binding.profile);
+  await runChild(process.platform === 'darwin' ? process.execPath : 'powershell.exe', args, {
     cwd: DAEMON_DIR,
     env: { ...process.env, LARK_CLI_NO_PROXY: '1' },
   });
@@ -1114,7 +1103,7 @@ async function mainLoop() {
   await Promise.all(bindings.map((binding) => durableBotLoops(binding)));
 }
 
-const LARK_ENTRY = path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@larksuite', 'cli', 'bin', process.platform === 'win32' ? 'lark-cli.exe' : 'lark-cli');
+let LARK_ENTRY;
 const INBOX_ROOT = path.join(DAEMON_DIR, 'state', 'codex-inbox-v2');
 
 async function lark(binding, args, cwd = DAEMON_DIR) {
@@ -1331,6 +1320,7 @@ try {
   args = parseArgs(process.argv.slice(2));
   bindingsPath = args.bindings;
   config = loadAndValidateConfig(bindingsPath);
+  LARK_ENTRY = config.runtime.lark_cli_exe || (process.platform === 'darwin' ? '/opt/homebrew/bin/lark-cli' : path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@larksuite', 'cli', 'bin', process.platform === 'win32' ? 'lark-cli.exe' : 'lark-cli'));
   if (args.checkConfig) {
     process.stdout.write(`${JSON.stringify({ ok: true, bindings: Object.keys(config.bindings) })}\n`);
     process.exit(0);
