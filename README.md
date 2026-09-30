@@ -1,5 +1,17 @@
 # feishu-claude-code-bridge
 
+## Windows Codex / Orca 接手入口
+
+当前 Codex bridge 代码与配置文档维护在
+[`feat/feishu-ux-20260927`](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/feat/feishu-ux-20260927)。
+新 Codex session 请先读[配置与接手指南](https://github.com/frank-1-pn/feishu-claude-code-bridge/blob/feat/feishu-ux-20260927/codex-config/skills/feishu-bot-runtime/references/configuration-and-handoff.md)
+和[运行版本核对记录](https://github.com/frank-1-pn/feishu-claude-code-bridge/blob/feat/feishu-ux-20260927/docs/feishu-runtime-sync-20260930.md)。
+
+本 `main` 分支保留原 Claude 实现；下面的 Monitor / Claude PID 绑定步骤不适用于当前 Codex bridge。
+本机现有连接应复用，不因新 session 自动改绑或重启。新机器还有本机依赖需要配置，不能只克隆仓库就启动；密钥、真实绑定与消息状态不上传 Git。
+
+## Original Claude Code integration
+
 Personal-use bridge between Feishu (Lark) chats and a long-running
 Claude Code session on Windows. Lets the operator drive a desktop
 Claude Code instance from their phone — receive messages, run quick
