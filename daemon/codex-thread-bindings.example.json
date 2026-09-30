@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "runtime": {
+    "codex_home": "<ABSOLUTE_ACTIVE_CODEX_HOME>",
+    "codex_cli_js": "<ABSOLUTE_CODEX_CLI_JS_FILE>",
+    "orca_cli_exe": "<ABSOLUTE_ORCA_CLI_EXE_FILE>",
+    "lark_send_script": "<ABSOLUTE_EXISTING_LARK_SEND_PS1_FILE>",
+    "poll_interval_ms": 1000,
+    "heartbeat_interval_ms": 15000,
+    "pty_turn_timeout_ms": 1800000,
+    "max_inbound_bytes": 262144,
+    "max_event_age_ms": 86400000
+  },
+  "bindings": {
+    "bot1": {
+      "codex_thread_id": "<EXISTING_BOT1_CODEX_THREAD_UUID>",
+      "cwd": "<ABSOLUTE_EXISTING_KNOWLEDGE_VAULT>",
+      "chat_id": "<BOT1_CHAT_ID>",
+      "allowed_sender_id": "<BOT1_ALLOWED_SENDER_OPEN_ID>",
+      "profile": "",
+      "native_reply_mode": "quote",
+      "cardkit_enabled": true,
+      "reaction_feedback": true,
+      "voice_enabled": false,
+      "cloud_docs": { "enabled": true },
+      "document_organization": {
+        "version": 1,
+        "enabled": true,
+        "default_destination": "vault",
+        "bare_file_action": "organize"
+      }
+    },
+    "coding": {
+      "codex_thread_id": "<EXISTING_CODING_CODEX_THREAD_UUID>",
+      "cwd": "<ABSOLUTE_EXISTING_PROJECT_DIRECTORY>",
+      "chat_id": "<CODING_CHAT_ID>",
+      "allowed_sender_id": "<CODING_ALLOWED_SENDER_OPEN_ID>",
+      "profile": "coding-assistant-claude",
+      "native_reply_mode": "quote",
+      "cardkit_enabled": true,
+      "reaction_feedback": true,
+      "voice_enabled": false,
+      "cloud_docs": { "enabled": true },
+      "document_organization": {
+        "version": 1,
+        "enabled": true,
+        "default_destination": "project",
+        "bare_file_action": "organize"
+      }
+    }
+  }
+}
