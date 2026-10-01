@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readSilentCompletion } from './codex-bridge-completion.mjs';
 import { isAuthorizedMessage } from './codex-bridge-authorization.mjs';
 
 /**
@@ -142,7 +143,7 @@ function loadAndValidateConfig(bindingsPath) {
     if (!/^ou_[A-Za-z0-9]+$/.test(binding.allowed_sender_id ?? '')) {
       throw new Error(`${bot}: invalid allowed_sender_id`);
     }
-    if (binding.group_access !== undefined && (binding.group_access !== 'all_members_mentions' || !/^ou_[A-Za-z0-9]+$/.test(binding.bot_open_id ?? ''))) throw new Error(`${bot}: invalid group mention policy`);
+    if (binding.group_access !== undefined && (!['all_members_mentions','all_group_humans'].includes(binding.group_access) || !/^ou_[A-Za-z0-9]+$/.test(binding.bot_open_id ?? ''))) throw new Error(`${bot}: invalid group access policy`);
     if (typeof binding.profile !== 'string') throw new Error(`${bot}: profile must be a string`);
     if (profiles.has(binding.profile)) throw new Error(`${bot}: one runtime binding per Lark profile is required`);
     profiles.add(binding.profile);
@@ -340,11 +341,14 @@ function buildPrompt(binding, event) {
     ? event.content
     : JSON.stringify(event.content ?? '');
   const prefix = `[飞书消息｜${binding.bot}｜${event.message_id ?? event.id ?? 'unknown'}] `
-    + '已通过用户白名单。请在当前线程直接处理；阶段性工作进度可用 commentary 输出，bridge 会同步飞书，'
+    + `来源：sender_id=${event.sender_id ?? 'unknown'}；原消息时间=${event.create_time ?? event.timestamp ?? '未记录'}；回复=${event.parent_id ?? event.root_id ?? '无'}。`
+    + (binding.group_access === 'all_group_humans' ? `已通过绑定运营群人类成员校验。所有消息需在本会话可见；先判断是否需要行动或回复。无需回复时调用 node "${path.join(DAEMON_DIR,'codex-bridge-complete.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --disposition silent；这是结构化静默完成，成功后结束本轮，不发占位答复。此策略不自动转发 commentary 或表情。` : '')
+    + (binding.group_access === 'all_group_humans' ? '请在当前线程处理，需要回复的事务以 final 交付结果；无需回复的消息逐条用完成工具处理。' : '已通过用户白名单。请在当前线程直接处理；阶段性工作进度可用 commentary 输出，bridge 会同步飞书，')
     + '同一 message_id 的重复投递只视作同一请求，不重复执行已完成的操作。'
     + '不要输出隐藏思考过程；最终答复只包含最终结果并由 bridge 回传。'
     + `需要交付用户要求的本地文件时，用 node "${path.join(DAEMON_DIR, 'codex-bridge-send.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --file "绝对路径" 排入发送队列；只能提交用户要求的交付物，不能仅因链接提到了本地文件就上传。默认 --mode file；图片可用 image，音频 audio，视频 video 需 --cover 封面路径。文件限30MiB，图片10MiB，默认只允许当前工作目录。排队不等于送达。`
     + UX_PROMPT
+    + (binding.group_access==='all_group_humans' ? '本轮全群策略的专用协议优先于通用输出习惯：commentary仅在本session可见，不会自动发送到群。无关、感谢或无需行动/回复的消息逐条调用上述silent完成工具，成功后不生成占位final；需要处理的运营事务正常final交付。不要用普通final文本充当静默信号。' : '')
     + '若末尾为 ...(truncated)，先按 message_id 用现有 messages-mget 流程取全文。正文：';
   return content.includes('\n') || content.includes('\r')
     ? `${prefix}\n${content}`
@@ -1183,7 +1187,9 @@ async function durableBotLoops(binding) {
     },
     send: (text,key,context) => outbound.text(text,key,getRoute(context)),
     final,
-    progress: (text,key,context) => outbound.progress(text,key,getRoute({jobId:context?.jobId,
+    suppressNotices: () => binding.group_access==='all_group_humans',
+    silentCompletion: job => readSilentCompletion({root:path.join(DAEMON_DIR,'state','completions-v1'),binding,job}),
+    progress: (text,key,context) => binding.group_access==='all_group_humans' ? undefined : outbound.progress(text,key,getRoute({jobId:context?.jobId,
       jobs:[...inbox.jobs.values()].filter(job=>job.streamKey===key)}),context),
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });

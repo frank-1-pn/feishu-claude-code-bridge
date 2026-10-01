@@ -102,7 +102,22 @@ export class NativeInteractions {
     const jobId = event.message_id ?? event.id;
     this.source(jobId);
     if (!isBoundJob(this.binding, { event })) fail('native_source_binding_mismatch');
-    const prepared = await prepareInbound(this.binding, event, { download: this.request, downloadRoot: this.downloadRoot, writeText: atomicWriteText });
+    let prepared;
+    try {
+      prepared = await prepareInbound(this.binding, event, { download: this.request, downloadRoot: this.downloadRoot, writeText: atomicWriteText });
+    } catch(error) {
+      if(this.binding.group_access!=='all_group_humans')throw error;
+      // A failed attachment must not hide the original group message. Forward
+      // its body only, without exposing/using a rejected local resource path.
+      const code=/^attachment_[a-z_]+$/.test(error.code??'')?error.code:'attachment_prepare_failed';
+      const body=typeof event.content==='string'?event.content:JSON.stringify(event.content??{});
+      return {...event,attachmentPreparationError:code,content:body+'\n附件未成功准备（'+code+'）。仅原消息在本会话可见，不能假装已读附件；按业务相关性决定是否提示或澄清。'};
+    }
+    if(this.binding.group_access==='all_group_humans') {
+      // All-human input reaches the operator before a reply or ASR decision.
+      // Audio bytes are references, never an approved transcript or task.
+      return event.message_type==='audio'?{...prepared,content:prepared.content+'\n本轮全群接收保留音频引用，不自动ASR或发确认卡。尚无已确认文字；不能假装理解或执行音频内容。'}:prepared;
+    }
     if (event.message_type !== 'audio') return prepared;
     const resources = normalizeEvent(event).resources;
     const files = resources.map((resource, index) => ({ resource, index })).filter(({ resource }) => resource.kind === 'file');

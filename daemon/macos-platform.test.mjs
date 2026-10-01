@@ -21,6 +21,14 @@ test('worker config-only entry initializes without starting subscriptions or wor
  const result=spawnSync(process.execPath,[path.join(import.meta.dirname,'codex-bridge-worker.mjs'),'--bindings',file,'--check-config'],{encoding:'utf8'});
  assert.equal(result.status,0,result.stderr);assert.equal(JSON.parse(result.stdout).ok,true);
  assert.equal(fs.existsSync(path.join(import.meta.dirname,'state/events/test.ndjson')),false);
+ config.bindings.test.group_access='all_group_humans';config.bindings.test.bot_open_id='ou_bot';
+ fs.writeFileSync(file,JSON.stringify(config));
+ assert.equal(spawnSync(process.execPath,[path.join(import.meta.dirname,'codex-bridge-worker.mjs'),'--bindings',file,'--check-config'],{encoding:'utf8'}).status,0);
+ for(const change of [{group_access:'unknown'},{bot_open_id:''}]) {
+   fs.writeFileSync(file,JSON.stringify({...config,bindings:{test:{...config.bindings.test,...change}}}));
+   assert.notEqual(spawnSync(process.execPath,[path.join(import.meta.dirname,'codex-bridge-worker.mjs'),'--bindings',file,'--check-config'],{encoding:'utf8'}).status,0);
+ }
+
 });
 import {workerHealth,busHealth,retryDelay} from './macos-health.mjs';
 test('watchdog uses real process identity and fresh heartbeat, not recent chat activity',()=>{

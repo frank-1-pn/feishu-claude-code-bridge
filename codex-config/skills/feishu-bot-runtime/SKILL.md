@@ -20,7 +20,7 @@ description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会�
 
 1. **按 bot 粒度判冲突。** CommandLine 有 `--profile <name>` 就属于该 profile；无 profile 才是 Bot1。同一 bot 只允许一个 `event +subscribe`，不同 bot 可并存。
 2. **不要另起 subscribe。** 先只读检查状态，确认 daemon 不健康后才用现有 `ensure-bot.ps1` 恢复；共享 bridge 消费既有 NDJSON。不要用 `lark-cli event +subscribe --force` 抢占现有 daemon。
-3. **一条 thread 只绑定一个 bot。** 入站事件必须同时匹配配置中的 `chat_id` 和 `allowed_sender_id`；任何一项不匹配都忽略并记录元数据，不把正文写进运行日志。
+3. **一条 thread 只绑定一个 bot。** 缺省入站事件必须同时匹配配置中的 `chat_id` 和 `allowed_sender_id`；显式群策略允许绑定群内合法人类成员（精确 @ 或全群），不扩大其他群、私聊、机器人或卡片回调权限。拒绝事件只记录元数据，不把正文写进运行日志。
 4. **真实 profile 名不改。** 编程助手仍使用 `coding-assistant-claude`；这是飞书应用配置标识，不因运行时换成 Codex 而重命名。
 5. **不输出密钥。** 不打印或提交 app secret、访问令牌、回调 token、WebSocket access_key/ticket、真实绑定或私有消息状态。subscriber stderr 可能包含连接凭据，只读取脱敏字段。daemon 使用 `LARK_CLI_NO_PROXY=1`。
 
@@ -58,7 +58,7 @@ Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runt
 
 状态检查同时看 `transport_healthy`、`delivery_healthy` 和各 bot 的 queued_count、awaiting_delivery_count、awaiting_reply_count、failed_count、last_delivered_at。`healthy` 为兼容 supervisor 允许有界的启动和重连宽限期；`transport_healthy` 还要求所有连接的真实 pong 新鲜有效，offset 追平也不能单独证明送达。会话压缩时 Orca 可显示 Messages to be submitted after next tool call，这是 terminal 已排队，仍需 rollout marker 证明模型入站；不要盲目重发或打断业务任务。
 
-rollout 观察只转发显式 commentary 与 final/final_answer 或 task_complete 的最终文本，reasoning 永不外发。公开进度卡片按至少 2 秒节流更新，布局不变时只更新变化的文本元素；仍是公开快照，不是逐 token 流式输出。同一轮消费的多条输入共享一次最终回包；不同轮分别回包。出站分片使用稳定 Feishu idempotency key，网络重试不重新执行模型任务。投递或答复超时明确提示并继续观察迟到结果。
+`all_group_humans` 时自动 commentary 与新表情关闭；无需回复的已可见消息按[结构化静默完成协议](references/interaction-and-delivery.md#全群可见与静默完成)终结，不用普通 final 占位。其他策略的 rollout 观察只转发显式 commentary 与 final/final_answer 或 task_complete 的最终文本，reasoning 永不外发。公开进度卡片按至少 2 秒节流更新，布局不变时只更新变化的文本元素；仍是公开快照，不是逐 token 流式输出。同一轮消费的多条输入共享一次最终回包；不同轮分别回包。出站分片使用稳定 Feishu idempotency key，网络重试不重新执行模型任务。投递或答复超时明确提示并继续观察迟到结果。
 
 不要把旧 Claude Monitor task ID、`TaskList` 或 `binding-<claude_pid>` 当作 Codex bridge 的判活依据。旧 binding 仍为 hooks 路由保留；bridge 使用自己的 thread mapping 与 offset。
 

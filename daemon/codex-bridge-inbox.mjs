@@ -104,6 +104,14 @@ export class DurableInbox {
       return true;
     } finally { this.dispatching = false; }
   }
+  completeSilently(j) {
+    if(!j.markerSeen || !this.io.silentCompletion?.(j))return false;
+    const candidate={...j,status:'done',completedAt:this.now(),completionDisposition:'silent'};
+    for(const key of ['reply','replyKey','replyRetry','notice','noticeRetry','pendingProgress','timeoutNotice','timeoutNotified','timeoutNotifiedAt','receiptRetry','error'])delete candidate[key];
+    this.save(candidate);
+    for(const key of Object.keys(j))if(!(key in candidate))delete j[key];
+    Object.assign(j,candidate);this.io.log?.('inbox_silent_completed',{bot:this.bot,messageId:j.id});return true;
+  }
   scan(j) {
     const stat = fs.statSync(j.rollout, { throwIfNoEntry: false });
     if (!stat || stat.size < j.cursor) throw new Error('rollout_missing_or_truncated');
@@ -134,6 +142,7 @@ export class DurableInbox {
         j.markerSeen = true; j.status = 'delivered'; j.deliveredAt ??= this.now();
       }
       if (!j.markerSeen) continue;
+      if(this.completeSilently(j))break;
       const message = rolloutAssistantMessage(item);
       const observedAt=this.now(), at=eventTime(item,observedAt);
       if(message || executionActivity(item)) {
@@ -171,7 +180,7 @@ export class DurableInbox {
     for (const j of this.jobs.values()) {
       if (!['submitted','delivered'].includes(j.status)) continue;
       try {
-        this.scan(j);
+        if(!this.completeSilently(j))this.scan(j);
         if(j.error==='rollout_read_failed'){delete j.error;this.save(j);}
       } catch { j.error = 'rollout_read_failed'; this.save(j); }
       // Timed-out jobs remain watched; late delivery/final may still arrive.
@@ -195,6 +204,9 @@ export class DurableInbox {
   }
   async deliverReplies() {
     for (const j of this.jobs.values()) {
+      if(j.notice && this.io.suppressNotices?.(j)) {
+        j.noticeSuppressed=true;delete j.notice;delete j.noticeRetry;this.save(j);
+      }
       if (j.notice) {
         j.noticeRetry ??= {};
         if (!j.noticeRetry.blocked && (j.noticeRetry.retryAt ?? 0) <= this.now()) {
@@ -225,7 +237,7 @@ export class DurableInbox {
     const count = (s) => all.filter(j => s.includes(j.status)).length;
     return { queued_count: count(['queued']), awaiting_delivery_count: count(['submitted']),
       awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
-      failed_count: count(['failed']), completed_count: count(['done']), waiting_input_count: count(['waiting_input']),
+      failed_count: count(['failed']), completed_count: count(['done']), silent_completed_count:all.filter(j=>j.status==='done' && j.completionDisposition==='silent').length, waiting_input_count: count(['waiting_input']),
       watch_error_count: all.filter(j=>j.error==='rollout_read_failed').length,
       outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
       oldest_queued_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'queued').map(j => (this.now()-j.acceptedAt)/1000))),

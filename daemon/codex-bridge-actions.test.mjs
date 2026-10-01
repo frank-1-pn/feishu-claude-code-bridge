@@ -158,3 +158,10 @@ test('invalid form schema is rejected before exposing dead controls', () => {
   assert.throws(() => normalizeForm({ fields: [{ name: 'form_submit', label: 'bad', type: 'text' }] }));
   assert.throws(() => normalizeForm({ fields: [{ name: 'valid', label: 'bad', type: 'text', maxLength: 1001 }] }));
 });
+
+test('all-human group policy does not authorize ordinary members to click owner-bound controls',t=>{
+ const f=fixture(t);Object.assign(f.binding,{group_access:'all_group_humans',bot_open_id:'ou_bot'});
+ const other=f.callback();other.event.operator.open_id='ou_member';
+ assert.equal(f.accept(other).reason,'unauthorized');assert.equal(f.store.stats().accepted_count,0);
+ assert.equal(f.accept(f.callback()).accepted,true);
+});

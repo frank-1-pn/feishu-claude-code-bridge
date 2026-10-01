@@ -173,3 +173,10 @@ test('empty picker creates no deadline and malformed picker values cannot create
   assert.equal(store.acceptCallback(f.callback(context,{summary:'无截止时间',due:null},'blank'),f.auth).accepted,true);
   let due;await store.drain({handlers:{task_create:async op=>{due=taskDue(op.values.due);}}});assert.equal(due,undefined);
 });
+
+test('all-human group intake keeps native forms restricted to the configured owner',t=>{
+ const f=fixture(t);Object.assign(f.binding,{group_access:'all_group_humans',bot_open_id:'ou_bot'});
+ const {store,context}=f.ready();const other=f.callback(context);other.event.operator.open_id='ou_member';
+ assert.equal(store.acceptCallback(other,f.auth).reason,'unauthorized');assert.equal(store.stats().native_action_accepted_count,0);
+ assert.equal(store.acceptCallback(f.callback(context),f.auth).accepted,true);
+});

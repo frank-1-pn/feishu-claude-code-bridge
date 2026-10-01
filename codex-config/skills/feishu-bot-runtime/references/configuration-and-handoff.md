@@ -64,9 +64,10 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 
 | 可选绑定字段 | 默认与使用边界 |
 |---|---|
+| `group_access` | 缺省为单一绑定发送者；`all_members_mentions` 允许绑定群全体人类成员精确 @ 本 bot；`all_group_humans` 接收绑定群全体人类消息（含不 @）；仍拒绝其他群、私聊及机器人，且要求合法 `bot_open_id`。危险回调仍只允许 `allowed_sender_id` |
 | `native_reply_mode` | 默认 `quote`；另可选 `thread`、`off`。话题不会自动创建独立 Codex 会话 |
 | `cardkit_enabled` | 缺省启用；公开进度快照至少间隔 2 秒，非逐 token 输出；已关闭流式卡片自动转同卡整卡更新 |
-| `reaction_feedback` | 缺省启用；原消息表情表示已接收、处理中、答复送达，不等于任务业务验收 |
+| `reaction_feedback` | 缺省启用；`all_group_humans` 策略自动停止新表情；原消息表情表示已接收、处理中、答复送达，不等于任务业务验收 |
 | `voice_enabled` | 只有显式 `true` 才启用；当前用户选择保留入口但不开通 ASR，保持 `false` |
 | `cloud_docs.enabled` | 缺省启用报告云文档能力；设 `false` 关闭。权限或创建失败需按交付状态反馈 |
 | `document_organization` | 模板显式设 `version:1, enabled:true, bare_file_action:"organize"`。Bot1 默认 `vault`，coding 默认 `project`；单次明确去向优先 |

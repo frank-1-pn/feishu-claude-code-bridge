@@ -174,3 +174,29 @@ test('regular text uses normal preparation and actual inbox dispatch without nat
   assert.equal(f.calls.length, 0); assert.equal(f.sent.length, 0);
   await assert.rejects(f.native.prepare({ ...job.event, sender_id: 'ou_other' }), { code: 'native_source_binding_mismatch' });
 });
+
+test('all-human group audio is visible with verified attachment reference and no preclassification ASR or UI',async t=>{
+ const f=fixture(t,{voiceEnabled:true});Object.assign(f.binding,{group_access:'all_group_humans',bot_open_id:'ou_bot'});f.restart();
+ const job=f.inbox.enqueue({type:'im.message.receive_v1',message_id:'om_group_audio',message_type:'audio',chat_id:f.binding.chat_id,
+   chat_type:'group',sender_type:'user',sender_id:'ou_member',content:JSON.stringify({file_key:'file_fixture'}),bridge_binding:bindingSnapshot(f.binding)});
+ await f.inbox.dispatchOne();assert.equal(job.status,'submitted');assert.equal(f.injected.length,1);assert.equal(f.sent.length,0);
+ assert.match(f.injected[0].content,/已下载文件/);assert.match(f.injected[0].content,/尚无已确认文字/);
+ assert.equal(f.calls.filter(args=>args[2]?.includes('speech_to_text')).length,0);assert.equal(f.contexts('voice_confirm').length,0);
+});
+test('failed group attachment remains visible without using rejected paths or emitting fallback',async t=>{
+ const f=fixture(t);Object.assign(f.binding,{group_access:'all_group_humans',bot_open_id:'ou_bot'});f.restart();
+ const job=f.inbox.enqueue({type:'im.message.receive_v1',message_id:'om_group_badfile',message_type:'file',chat_id:f.binding.chat_id,
+   chat_type:'group',sender_type:'user',sender_id:'ou_member',content:JSON.stringify({file_name:'missing'}),bridge_binding:bindingSnapshot(f.binding)});
+ await f.inbox.dispatchOne();assert.equal(job.status,'submitted');assert.equal(f.injected.length,1);assert.equal(f.sent.length,0);
+ assert.equal(f.injected[0].attachmentPreparationError,'attachment_resource_key_missing');assert.match(f.injected[0].content,/不能假装已读/);
+});
+test('group visibility fallback never exposes or uses a rejected attachment path',async t=>{
+ const f=fixture(t);Object.assign(f.binding,{group_access:'all_group_humans',bot_open_id:'ou_bot'});f.restart();
+ const outside=path.join(f.root,'private-outside.txt');fs.writeFileSync(outside,'private outside contents');
+ f.native.request=async()=>({saved_path:outside});
+ const job=f.inbox.enqueue({type:'im.message.receive_v1',message_id:'om_group_escape',message_type:'file',chat_id:f.binding.chat_id,
+   chat_type:'group',sender_type:'user',sender_id:'ou_member',content:JSON.stringify({file_key:'file_fixture'}),bridge_binding:bindingSnapshot(f.binding)});
+ await f.inbox.dispatchOne();assert.equal(job.status,'submitted');assert.equal(f.sent.length,0);assert.equal(f.injected.length,1);
+ assert.equal(f.injected[0].attachmentPreparationError,'attachment_outside_download_root');
+ assert.ok(!f.injected[0].content.includes(outside));assert.ok(!f.injected[0].content.includes('private outside contents'));
+});

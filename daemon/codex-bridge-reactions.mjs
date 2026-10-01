@@ -14,6 +14,7 @@ const validId=id=>typeof id==='string' && /^[A-Za-z0-9_-]{1,512}$/.test(id);
 export function reactionForJob(job,now=Date.now(),maxAgeMs=86400000) {
   if(now-job.acceptedAt>maxAgeMs)return null;
   // DONE means the reply outbox has committed delivery, not merely model output.
+  if(job.completionDisposition==='silent')return null;
   if(job.status==='done')return 'DONE';
   if(job.status==='failed' || job.replyRetry?.blocked)return 'ERROR';
   if(job.status==='waiting_input')return 'OneSecond';
@@ -26,7 +27,7 @@ export function reactionForJob(job,now=Date.now(),maxAgeMs=86400000) {
 // Intents and reaction IDs survive crashes; uncertain creates are reconciled
 // against this exact app before retrying. Other users/apps are never removed.
 export class DurableReactions {
-  constructor({root,binding,request,resolveAppId,now=Date.now,maxAgeMs=86400000,enabled=binding.reaction_feedback!==false}) {
+  constructor({root,binding,request,resolveAppId,now=Date.now,maxAgeMs=86400000,enabled=binding.reaction_feedback!==false && binding.group_access!=='all_group_humans'}) {
     Object.assign(this,{binding,request,resolveAppId,now,maxAgeMs,enabled});
     this.dir=path.join(root,binding.bot);fs.mkdirSync(this.dir,{recursive:true});
     this.scope=digest(JSON.stringify(bindingSnapshot(binding)));

@@ -20,3 +20,12 @@ test('legacy single sender bindings remain restricted',()=>{
  assert.equal(isAuthorizedMessage(legacy,{...event,sender_id:'ou_owner',mentions:[]}),true);
  assert.equal('group_access' in bindingSnapshot(legacy),false);
 });
+test('all group human policy admits unmentioned members and rejects loops and scope expansion',()=>{
+ const group={...binding,group_access:'all_group_humans'};
+ const human={...event,mentions:[]};
+ for(const sender_id of ['ou_owner','ou_newmember','ou_second'])assert.equal(isAuthorizedMessage(group,{...human,sender_id}),true);
+ for(const patch of [{chat_id:'oc_other'},{chat_type:'p2p'},{sender_type:'app'},{sender_type:'bot'},{sender_type:undefined},{chat_type:undefined},{sender_id:'ou_bot'},{sender_id:'invalid'},{type:'card.action.trigger'}])assert.equal(isAuthorizedMessage(group,{...human,...patch}),false);
+ assert.equal(isBoundJob(group,{event:{...human,bridge_binding:bindingSnapshot(group)}}),true);
+ assert.equal(isBoundJob(group,{event:{...human,bridge_binding:bindingSnapshot(binding)}}),false);
+ assert.equal(isBoundJob(group,{event:{...human,synthetic_callback:true,type:'card.action.trigger',sender_id:'ou_newmember'}}),false);
+});
