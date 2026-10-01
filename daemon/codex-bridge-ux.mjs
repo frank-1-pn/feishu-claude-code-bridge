@@ -1,3 +1,4 @@
+import { isAuthorizedMessage } from './codex-bridge-authorization.mjs';
 import { sanitizeFeishuReply } from './codex-bridge-sanitize.mjs';
 import { normalizeForm } from './codex-bridge-actions.mjs';
 
@@ -29,11 +30,12 @@ export function publicPhase(text) {
 
 export function bindingSnapshot(binding) {
   return {bot:binding.bot,profile:binding.profile??'',chat_id:binding.chat_id,
-    allowed_sender_id:binding.allowed_sender_id,codex_thread_id:binding.codex_thread_id};
+    allowed_sender_id:binding.allowed_sender_id,codex_thread_id:binding.codex_thread_id,
+    ...(binding.group_access ? {group_access:binding.group_access,bot_open_id:binding.bot_open_id} : {})};
 }
 
 export function isBoundJob(binding, job) {
-  if(job?.event?.chat_id!==binding.chat_id || job.event.sender_id!==binding.allowed_sender_id) return false;
+  if(binding.group_access ? !isAuthorizedMessage(binding,job?.event) && !(job?.event?.synthetic_callback && job.event.chat_id===binding.chat_id && job.event.sender_id===binding.allowed_sender_id) : job?.event?.chat_id!==binding.chat_id || job.event.sender_id!==binding.allowed_sender_id) return false;
   if(job.event.codex_thread_id && job.event.codex_thread_id!==binding.codex_thread_id)return false;
   if(job.event.bridge_binding && Object.entries(bindingSnapshot(binding)).some(([k,v])=>job.event.bridge_binding[k]!==v)) return false;
   // Old records have no binding snapshot. A submitted record still has its

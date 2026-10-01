@@ -17,7 +17,7 @@ export function authorizedFileJob(inboxRoot, binding, jobId, replyKey) {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(binding.bot ?? '') || !/^om_[A-Za-z0-9_-]+$/.test(jobId ?? '')) throw permanent('invalid_attachment_request');
   const job = JSON.parse(fs.readFileSync(path.join(inboxRoot, binding.bot, `job-${digest(jobId)}.json`), 'utf8'));
   if (job.id !== jobId || !binding.chat_id || !binding.allowed_sender_id
-      || job.event?.chat_id !== binding.chat_id || job.event?.sender_id !== binding.allowed_sender_id
+      || job.event?.chat_id !== binding.chat_id || (!binding.group_access && job.event?.sender_id !== binding.allowed_sender_id)
       || (replyKey !== undefined && (!/^[a-f0-9]{64}$/.test(replyKey) || job.replyKey !== replyKey))) throw permanent('attachment_binding_mismatch');
   if(!isBoundJob(binding,job))throw permanent('attachment_binding_changed');
   return job;

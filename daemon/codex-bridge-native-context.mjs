@@ -6,12 +6,12 @@ const nativeId=value=>typeof value==='string'&&/^om_[A-Za-z0-9_-]+$/.test(value)
 const topicId=value=>typeof value==='string'&&/^(?:om|omt)_[A-Za-z0-9_-]+$/.test(value);
 const digestContext=(binding,event)=>digest(JSON.stringify(['native-context-v2',bindingSnapshot(binding),event.message_id??event.id,
   event.thread_id??null,event.root_id??null,event.parent_id??null]));
-function verifyMessage(binding,id,message){
+function verifyMessage(binding,id,message,sourceSender=binding.allowed_sender_id){
   if(message?.message_id!==id)throw invalid('native_context_message_mismatch');
   const senders=[message.sender_id,message.sender?.open_id,message.sender?.sender_id?.open_id,
     message.sender?.id_type==='open_id'||/^ou_[A-Za-z0-9_-]+$/.test(message.sender?.id??'')?message.sender?.id:undefined]
     .filter(value=>typeof value==='string');
-  if((message.chat_id!==undefined&&message.chat_id!==binding.chat_id)||senders.some(sender=>sender!==binding.allowed_sender_id)
+  if((message.chat_id!==undefined&&message.chat_id!==binding.chat_id)||senders.some(sender=>sender!==sourceSender)
     ||(message.sender?.sender_type&&message.sender.sender_type!=='user'))throw invalid('native_context_binding_mismatch');
   for(const key of ['thread_id','root_id','parent_id']){
     const value=message[key];
@@ -39,7 +39,7 @@ export async function hydrateNativeContext(binding,event,request){
   let message=matches[0];
   // Missing identity fields are an unavailable capability; conflicting fields
   // are a scope violation, never a reason to send into a different conversation.
-  if(!verifyMessage(binding,id,message))return event;
+  if(!verifyMessage(binding,id,message,event.sender_id))return event;
   let complete=true;
   // CLI's friendly output replaces parent_id with reply_to and omits root_id.
   // Only relational messages need one raw read to recover that lost metadata.
@@ -49,7 +49,7 @@ export async function hydrateNativeContext(binding,event,request){
     if(Array.isArray(raw?.items)&&raw.items.length){
       const exact=raw.items.filter(item=>item?.message_id===id);
       if(exact.length!==1)throw invalid('native_context_message_mismatch');
-      if(!verifyMessage(binding,id,exact[0]))return event;
+      if(!verifyMessage(binding,id,exact[0],event.sender_id))return event;
       message=exact[0];
     }else complete=false;
   }

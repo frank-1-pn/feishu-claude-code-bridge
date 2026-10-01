@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isAuthorizedMessage } from './codex-bridge-authorization.mjs';
 
 /**
  * Thin Feishu -> Codex bridge.
@@ -141,6 +142,7 @@ function loadAndValidateConfig(bindingsPath) {
     if (!/^ou_[A-Za-z0-9]+$/.test(binding.allowed_sender_id ?? '')) {
       throw new Error(`${bot}: invalid allowed_sender_id`);
     }
+    if (binding.group_access !== undefined && (binding.group_access !== 'all_members_mentions' || !/^ou_[A-Za-z0-9]+$/.test(binding.bot_open_id ?? ''))) throw new Error(`${bot}: invalid group mention policy`);
     if (typeof binding.profile !== 'string') throw new Error(`${bot}: profile must be a string`);
     if (profiles.has(binding.profile)) throw new Error(`${bot}: one runtime binding per Lark profile is required`);
     profiles.add(binding.profile);
@@ -769,12 +771,7 @@ async function ensureReceipt(binding, messageId) {
   }
 }
 
-function isAuthorizedEvent(binding, event) {
-  return event
-    && event.type === 'im.message.receive_v1'
-    && event.chat_id === binding.chat_id
-    && event.sender_id === binding.allowed_sender_id;
-}
+const isAuthorizedEvent = isAuthorizedMessage;
 
 function isFreshEvent(event) {
   const rawTimestamp = event.timestamp ?? event.create_time;
