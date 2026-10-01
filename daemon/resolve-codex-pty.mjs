@@ -1,6 +1,6 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {activeCodexWriters,resolveManagedDaemon} from './codex-managed-app-server.mjs';
 import {fileURLToPath} from 'node:url';
 export function selectWriterPty(writers, processes, sessions) {
   const parents=new Map(processes.map(p=>[p.pid,p.ppid])); const matches=[];
@@ -15,18 +15,10 @@ export function selectWriterPty(writers, processes, sessions) {
 export function resolve(args) {
   const thread=args['--thread-id'],home=args['--codex-home'];
   if(!/^[a-f0-9-]{36}$/i.test(thread||'')||!path.isAbsolute(home||''))throw Error('invalid_resolver_arguments');
-  const lock=path.join(home,'thread-writer-locks',`${thread}.lock`);
-  if(!fs.existsSync(lock))return {ok:true,active_writer:false};
-  // Probe the advisory lock without modifying it. Mere file existence is not ownership.
-  const probe=execFileSync('/usr/bin/python3',['-c',`import fcntl,sys
-f=open(sys.argv[1],'r+')
-try:
- fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);print('free')
-except BlockingIOError: print('busy')`,lock],{encoding:'utf8'}).trim();
-  if(probe==='free')return {ok:true,active_writer:false};
-  const output=execFileSync('/usr/sbin/lsof',['-Fpc',lock],{encoding:'utf8'});
-  const writers=[];let pid;
-  for(const line of output.split('\n')){if(line.startsWith('p'))pid=Number(line.slice(1));if(line==='ccodex')writers.push(pid);}
+  const writers=activeCodexWriters(home,thread);
+  if(!writers.length)return {ok:true,active_writer:false};
+  const managed=resolveManagedDaemon(home,thread,writers);
+  if(managed)return {ok:true,active_writer:true,...managed};
   const processes=execFileSync('/bin/ps',['-axo','pid=,ppid='],{encoding:'utf8'}).trim().split('\n').map(s=>{const [pid,ppid]=s.trim().split(/\s+/).map(Number);return {pid,ppid};});
   const sessions=JSON.parse(execFileSync(process.execPath,[args['--rpc-script'],'--mode','list'],{encoding:'utf8'})).sessions;
   return {ok:true,active_writer:true,...selectWriterPty(writers,processes,sessions)};

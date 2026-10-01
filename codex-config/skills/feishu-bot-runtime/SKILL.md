@@ -50,6 +50,8 @@ description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会�
 
 bridge 的线程推进有两条互斥路径：目标 thread 已被 Orca/Codex 桌面端持有时，通过 writer lock 的 PID 动态定位现有 Orca terminal，再调用公开的 `orca terminal send --text ... --enter --json` agent-prompt 接口，并从 rollout 等待对应的 `final_answer`；目标 thread 没有活跃 writer 时，才使用 `codex exec resume`。不要在已有 writer 时另起第二个 Codex 进程抢锁。本机 Codex app-server 虽有 `turn/steer`，但另一个 app-server 进程不能附着到已被 Orca TUI 持有的 thread，会被 active-writer lock 拒绝。
 
+macOS 已存在的 Codex Desktop managed app-server 也可持有目标 writer。仅在 native PID/boot/start 身份、当前 home 私有 daemon 记录、writer lock 与受保护 Unix socket 全部匹配时，bridge 连接现有 daemon，不另起 app-server。先核对已加载的精确绑定 thread/cwd；active 用 expectedTurnId steer，idle 只用原 thread/input start，不覆盖模型或权限。仍以 rollout 原消息 marker 和最终投递为验收，ACK不是送达。
+
 不要直接用 terminal daemon 的 raw `write` 模拟正文 + 回车：它没有 key-event 语义，连续写入可能把消息留在 composer。普通消息统一走 Orca 的 agent-prompt 接口；它在后台 daemon 内完成 bracketed paste、Windows ConPTY 1500ms settle delay 和提交，不依赖窗口焦点或屏幕点亮。超过 Windows argv 安全长度的消息才允许 raw bracketed paste，但最终 Enter 仍走 `orca terminal send --enter`。这条路径是 Codex 当前的兼容实现，不得描述成 Claude 官方 `claude/channel`：Codex 尚无能把 MCP notification 原生推进既有会话的 channel capability。
 
 Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runtime 已经接受并排队 agent prompt。此时不能立刻向飞书发失败提示；以 rollout 中带 `message_id` 的 user marker 为入站权威，并等待对应最终答复。marker 等待超时表示尚未确认入站；已有 marker 后按最近公开进度或工具调用/返回的事件时间判断无活动时长，默认连续 30 分钟无活动才提醒，不能倒推成注入失败或重投任务。token 计数、文件更新时间和隐藏思考不用于延后提醒。

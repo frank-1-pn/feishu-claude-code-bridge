@@ -94,3 +94,28 @@ inactive until a user supplies and authorizes endpoint, model and private API-ke
 path. It sends only allowlisted health metadata. Model advice cannot become a
 shell command or interrupt a healthy component/active Codex writer. Provider
 setup and automatic invocation are pending; the model does not currently run.
+
+## Existing Codex Desktop managed daemon
+
+A held writer lock may belong to an existing managed app-server instead of an
+Orca PTY. The resolver recognizes this only when the exact writer PID matches
+the current home daemon record, native macOS boot/unique/start identity, managed
+executable path and the protected owned Unix socket. It connects directly with
+standard WebSocket Upgrade over Unix; `app-server proxy` forwards raw bytes and
+is not a JSONL RPC adapter. No extra app-server, daemon update, resume, model or
+permission override is performed.
+
+The bridge initializes a connection, checks `thread/loaded/list`, and reads the
+exact bound root thread and cwd. Active turns accept one `turn/steer` with the
+exact `expectedTurnId`; idle threads accept one `turn/start` with only thread and
+text input. Both paths keep the durable submitted checkpoint and require the
+original rollout user marker for actual delivery. Race rejection, lost ACK or
+transport timeout never trigger mutation fallback or automatic task replay.
+Read-only checks happen before marking a queued item submitted; identity and
+socket inode are checked again immediately before submission. Existing Desktop
+approval handling remains authoritative; the bridge grants no approvals.
+
+Protocol reference: [official Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
+Tests include real local Unix WebSocket fixtures and persistent inbox restart
+reconciliation. A successful fixture or read-only live probe does not prove
+actual prompt ingress or final Feishu delivery; those still need live acceptance.

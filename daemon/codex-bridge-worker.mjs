@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { inspectManagedThread,submitManagedTurn } from './codex-managed-app-server.mjs';
 import { readSilentCompletion } from './codex-bridge-completion.mjs';
 import { isAuthorizedMessage } from './codex-bridge-authorization.mjs';
 
@@ -619,6 +620,12 @@ async function runCodex(binding, event, replyPath) {
   const progressState = { sentCount: 0, lastSentAt: 0 };
   const onCommentary = (text) => forwardCommentary(binding, messageId, text, progressState);
   const pty = await resolveActivePty(binding);
+  if(pty?.transport==='managed_app_server') {
+    const rolloutPath=findRolloutPath(binding.codex_thread_id),startOffset=fs.statSync(rolloutPath).size;
+    await submitManagedTurn(pty,binding,prompt);
+    atomicWriteText(replyPath,await waitForRolloutFinal(rolloutPath,startOffset,messageId,onCommentary));
+    return 'managed_app_server';
+  }
   if (pty) {
     try {
       await runPtyTurn(binding, event, prompt, replyPath, pty, onCommentary);
@@ -1172,10 +1179,13 @@ async function durableBotLoops(binding) {
     },
     target: async () => {
       const pty = await resolveActivePty(binding);
+      if(pty?.transport==='managed_app_server')await inspectManagedThread(pty,binding);
       return { pty, rollout: findRolloutPath(binding.codex_thread_id) };
     },
     inject: async (job,target) => {
-      if (target.pty) {
+      if(target.pty?.transport==='managed_app_server') {
+        await submitManagedTurn(target.pty,binding,buildPrompt(binding,job.prepared));
+      } else if (target.pty) {
         await runPtyTurn(binding,job.event,buildPrompt(binding,job.prepared),'',target.pty,null,true);
       } else {
         // Without a live terminal, keep one resume writer at a time. Intake,
