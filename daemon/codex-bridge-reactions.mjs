@@ -27,7 +27,7 @@ export function reactionForJob(job,now=Date.now(),maxAgeMs=86400000) {
 // Intents and reaction IDs survive crashes; uncertain creates are reconciled
 // against this exact app before retrying. Other users/apps are never removed.
 export class DurableReactions {
-  constructor({root,binding,request,resolveAppId,now=Date.now,maxAgeMs=86400000,enabled=binding.reaction_feedback!==false && binding.group_access!=='all_group_humans'}) {
+  constructor({root,binding,request,resolveAppId,now=Date.now,maxAgeMs=86400000,enabled=binding.reaction_feedback!==false}) {
     Object.assign(this,{binding,request,resolveAppId,now,maxAgeMs,enabled});
     this.dir=path.join(root,binding.bot);fs.mkdirSync(this.dir,{recursive:true});
     this.scope=digest(JSON.stringify(bindingSnapshot(binding)));
@@ -46,13 +46,17 @@ export class DurableReactions {
     for(const job of jobs) {
       if(!isBoundJob(this.binding,job) || job.event?.synthetic_callback || !/^om_[A-Za-z0-9_-]+$/.test(job.id??''))continue;
       let row=this.rows.get(job.id);
+      const classified=this.binding.group_access==='all_group_humans';
+      const allowed=!classified || job.markerSeen && job.feedbackDisposition==='actionable' && job.completionDisposition!=='silent';
+      if(!row && !allowed)continue;
       if(!row && (!this.enabled || this.corrupt.has(path.basename(this.file(job.id))) ||
           (['done','failed'].includes(job.status) && job.acceptedAt<this.meta.enabledSince) || this.now()-job.acceptedAt>this.maxAgeMs))continue;
       if(!row){row={schema:1,scope:this.scope,messageId:job.id,createdAt:this.now(),desired:null,current:null,pending:null};this.rows.set(job.id,row);}
       // Completed acknowledgements may remain; expired active indicators clear.
-      let desired=reactionForJob(job,this.now(),this.maxAgeMs);
-      if(this.now()-job.acceptedAt>this.maxAgeMs && terminal.has(row.current?.emoji))desired=row.current.emoji;
-      if(!this.enabled)desired=terminal.has(row.current?.emoji)?row.current.emoji:null;
+      let desired=allowed?reactionForJob(job,this.now(),this.maxAgeMs):null;
+      if(classified && desired==='OnIt')desired=null;
+      if(allowed && this.now()-job.acceptedAt>this.maxAgeMs && terminal.has(row.current?.emoji))desired=row.current.emoji;
+      if(!this.enabled)desired=allowed && terminal.has(row.current?.emoji)?row.current.emoji:null;
       if(row.desired!==desired || !fs.existsSync(this.file(job.id))) {
         row.desired=desired;row.updatedAt=this.now();
         if(!row.retry?.blocked)delete row.retry;

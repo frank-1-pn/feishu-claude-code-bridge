@@ -105,14 +105,20 @@ export class DurableInbox {
     } finally { this.dispatching = false; }
   }
   completeSilently(j) {
-    if(!j.markerSeen || !this.io.silentCompletion?.(j))return false;
-    const candidate={...j,status:'done',completedAt:this.now(),completionDisposition:'silent'};
+    if(!j.markerSeen)return false;
+    const disposition=this.io.classification?.(j);
+    if(disposition==='actionable' && j.feedbackDisposition!=='actionable') {
+      const candidate={...j,feedbackDisposition:'actionable',feedbackAcceptedAt:this.now()};this.save(candidate);Object.assign(j,candidate);
+    }
+    if(disposition!=='silent' && !this.io.silentCompletion?.(j))return false;
+    const candidate={...j,status:'done',completedAt:this.now(),completionDisposition:'silent',feedbackDisposition:'silent'};
     for(const key of ['reply','replyKey','replyRetry','notice','noticeRetry','pendingProgress','timeoutNotice','timeoutNotified','timeoutNotifiedAt','receiptRetry','error'])delete candidate[key];
     this.save(candidate);
     for(const key of Object.keys(j))if(!(key in candidate))delete j[key];
     Object.assign(j,candidate);this.io.log?.('inbox_silent_completed',{bot:this.bot,messageId:j.id});return true;
   }
   scan(j) {
+    if(j.unclassifiedTurnEnded)return [];
     const stat = fs.statSync(j.rollout, { throwIfNoEntry: false });
     if (!stat || stat.size < j.cursor) throw new Error('rollout_missing_or_truncated');
     if (stat.size === j.cursor) return [];
@@ -154,13 +160,20 @@ export class DurableInbox {
         }
       }
       if (message?.phase === 'commentary') {
-        j.streamKey = digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}`);
-        const progress={text:message.text,key:j.streamKey,at,observedAt,position:absoluteEnd};
+        let text=message.text;
+        if(this.io.classifiedFeedback && !j.event?.synthetic_callback) {
+          const tagged=/^\s*\[飞书进度｜(om_[A-Za-z0-9_-]+)\]\s*([^]*)$/.exec(text);
+          if(j.feedbackDisposition!=='actionable' || tagged?.[1]!==j.id)continue;
+          text=tagged[2];
+        }
+        j.streamKey = digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}${this.io.classifiedFeedback?'\0'+j.id:''}`);
+        const progress={text,key:j.streamKey,at,observedAt,position:absoluteEnd};
         const prior=j.pendingProgress?.events??(j.pendingProgress?[j.pendingProgress]:[]);
         j.pendingProgress={...progress,events:[...prior,progress].slice(-12)};
       }
       const completion = rolloutTaskCompletion(item);
       if (message?.phase === 'final_answer' || completion?.kind === 'final') {
+        if(this.io.classifiedFeedback && !j.event?.synthetic_callback && j.feedbackDisposition!=='actionable') {j.unclassifiedTurnEnded=true;break;}
         j.status = 'reply_pending'; j.reply = message?.text ?? completion.text;
         if(j.timeoutNotice && j.notice===j.timeoutNotice){delete j.notice;delete j.noticeRetry;}
         // All steer messages consumed by one turn share exactly one outbox key.
@@ -237,7 +250,7 @@ export class DurableInbox {
     const count = (s) => all.filter(j => s.includes(j.status)).length;
     return { queued_count: count(['queued']), awaiting_delivery_count: count(['submitted']),
       awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
-      failed_count: count(['failed']), completed_count: count(['done']), silent_completed_count:all.filter(j=>j.status==='done' && j.completionDisposition==='silent').length, waiting_input_count: count(['waiting_input']),
+      failed_count: count(['failed']), completed_count: count(['done']), silent_completed_count:all.filter(j=>j.status==='done' && j.completionDisposition==='silent').length, actionable_count:all.filter(j=>j.feedbackDisposition==='actionable').length, waiting_input_count: count(['waiting_input']),
       watch_error_count: all.filter(j=>j.error==='rollout_read_failed').length,
       outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
       oldest_queued_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'queued').map(j => (this.now()-j.acceptedAt)/1000))),

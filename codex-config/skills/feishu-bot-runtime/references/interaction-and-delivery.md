@@ -14,11 +14,19 @@
 
 ## 全群可见与静默完成
 
-`all_group_humans` 策略先将绑定群所有合法人类消息持久入队并注入同一运营 thread。发送者、原消息时间和回复链随原 message_id 提供；去重与绑定快照保留。无需回复的判断由运营 session 作出，不能在后台按关键词丢弃闲聊。此策略不自动外发 commentary、新表情或未分类消息的超时/准备失败占位；私有 stalled/failed 健康诊断保留，不能将静默故障误记为成功；需要回复的消息仍按既有 final 回传。
+`all_group_humans` 策略先将绑定群所有合法人类消息持久入队并注入同一运营 thread。发送者、原消息时间和回复链随原 message_id 提供；去重与绑定快照保留。无需回复的判断由运营 session 作出，不能在后台按关键词丢弃闲聊。此策略不自动外发未分类 commentary、表情或消息的超时/准备失败占位；私有 stalled/failed 健康诊断保留，不能将静默故障误记为成功；需要处理/回复的消息先分类 actionable，再按既有 final 回传。
 
 全群策略的音频也携带经过验证的下载引用进入 session，不自动转写、发语音确认卡或先发 ASR 关闭占位。没有已确认文字时不能把音频当作已理解的指令。附件准备失败时只注入原正文与安全错误分类，不能使用被拒绝的路径；运营 session 再按相关性决定是否澄清。其他策略保留原语音确认与附件错误处理流程。
 
-无需回复时使用本轮注入提供的专用工具路径：
+运营事务开始执行前，使用本轮注入提供的工具：
+
+```sh
+node "<运行目录>/codex-bridge-feedback.mjs" --bot <本轮bot> --job-id <本轮原message_id> --state actionable
+```
+
+工具只持久保存请求，返回 queued 不等于生效。worker 在确认该 job 的原消息 rollout marker 后写入 `feedbackDisposition=actionable`。`reaction_feedback=true` 时仅此 job 可显示 Typing、等待/失败及答复真实送达后的 DONE，入队不加 OnIt，不补标历史已完成任务。进度 commentary 必须以 `[飞书进度｜原message_id]` 开头；标签会被移除，正文通过独立任务进度卡回到该条原消息/话题。同 turn 两个任务使用独立 streamKey；未标记及 silent 消息不进入 progress route 或 final peers。无标签普通 commentary 只在 session 可见。最终回包收尾本轮各任务进度卡，完整结果只发送一次。
+
+silent 和 actionable 共用 `completions-v1` 下唯一不可变 disposition，原子硬链接发布防止并发两工具都成功；重复同分类幂等，不同分类拒绝。旧 silent 请求兼容读取。无需回复时使用本轮注入提供的专用工具路径：
 
 ```sh
 node "<运行目录>/codex-bridge-complete.mjs" --bot <本轮bot> --job-id <本轮原message_id> --disposition silent
