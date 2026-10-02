@@ -111,3 +111,9 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 ### Managed入站提速部署边界
 
 合并重复连接准备、复用原managed连接和监听既有事件文件只涉及运行模块，不要求改变模型/effort、权限、subscriber、writer、绑定或offset。配置与只读助手保持原hash；上线以固定测试并发布的ref/tree、准确模块和生效技能hash核对，经过原会话空闲及全队列/真实pong门禁。连接复用仍须最新会话和提交前身份核验，身份失效不重放未知修改。只能由唯一部署者替换worker并待原watchdog恢复；只读安装验收与真人提速分别记录。
+
+### 可靠性修复与后台调度
+
+全群模式的故障通知仅在原消息marker与actionable均已确认后显示；静默、未分类和未入站故障保留诊断而不打扰群。共享final的答复送达与各原任务卡关闭分别持久化；晚扫描、重启及旧版漏关卡只补原卡关闭，不重复全文、报告、按钮或业务。独立请求可越过准备退避；同发送者、回复链和未知旧记录仍保序，原生上下文不可验证时保守FIFO。入站摘要不是鉴权秘密，越过队列须本地API查验记录。
+
+持久调度无需改变绑定配置；只响应主会话显式提交的后台任务，初始队列为空。使用与恢复见[background-tasks.md](background-tasks.md)。安装须同时包含store、CLI、runner及worker接线，并更新生效技能参考；增加后台队列计数到空闲门禁。只替换固定测试并发布版本的必要组件，保留配置文件字节、原managed writer、subscriber及事件源。源码回归、安装读回、独立子任务smoke和真实群完整闭环分别记录，不能互相替代。

@@ -9,10 +9,14 @@ import { replyRouteNotice } from './codex-bridge-reply-routing.mjs';
 // sends use that same lane and must finish before the final-card operation.
 export function createReplyDelivery({ binding, actions, outbound, files, reportOptions, cloudDocs, nativeInteractions, getRoute, log=()=>{} }) {
   const unavailable=(name,jobId)=>{try{log(name,{bot:binding.bot,jobId});}catch{/* Feedback must not block the answer. */}};
-  return async (value, replyKey, streamKeys=[], context={}) => {
+  const deliver=async (value, replyKey, streamKeys=[], context={}) => {
     if(context.jobId){
       const origin=authorizedFileJob(reportOptions.inboxRoot,binding,context.jobId,replyKey);
       if(!isBoundJob(binding,origin))throw Object.assign(Error('reply_binding_changed'),{permanent:true});
+    }
+    // Card-only reconciliation must bypass reports, uploads and action setup.
+    if(outbound.replyDelivered?.(replyKey)) {
+      await deliver.closeCards(replyKey,streamKeys,context);return;
     }
     const clean=sanitizeFeishuReply(value).trim();
     const ux=parseReplyUx(clean);
@@ -76,4 +80,17 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
     }
     await outbound.final(ux.form && !presentation.actionContext ? presentation.fallbackText : ux.text,replyKey,streamKeys,presentation);
   };
+  deliver.closeCards=async (replyKey,streamKeys=[],context={})=>{
+    const keys=[];
+    for(const peer of context.jobs??[]) {
+      const job=authorizedFileJob(reportOptions.inboxRoot,binding,peer.id,replyKey);
+      if(!job.markerSeen || job.completionDisposition==='silent' || job.unclassifiedTurnEnded
+          || !['reply_pending','done'].includes(job.status)
+          || (binding.group_access==='all_group_humans' && !job.event?.synthetic_callback && job.feedbackDisposition!=='actionable'))
+        throw Object.assign(Error('reply_card_job_not_actionable'),{permanent:true});
+      if(job.streamKey && streamKeys.includes(job.streamKey))keys.push(job.streamKey);
+    }
+    await outbound.closeReplyCards(replyKey,keys);
+  };
+  return deliver;
 }

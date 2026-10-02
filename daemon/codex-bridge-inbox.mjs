@@ -4,9 +4,15 @@ import { createHash } from 'node:crypto';
 import { atomicWriteJson } from './codex-bridge-storage.mjs';
 import { rolloutAssistantMessage, rolloutTaskCompletion } from './codex-bridge-progress.mjs';
 import { recordFailure } from './codex-bridge-retry.mjs';
+import { acceptedDispatchLane, nextDispatchJob, hasPriorDispatchDependency } from './codex-bridge-dispatch-lanes.mjs';
 
 export const digest = (s) => createHash('sha256').update(s).digest('hex');
 export const atomicJson = atomicWriteJson;
+
+// Full-group intake is quiet until the original marker and task disposition
+// are both verified. Failures of an accepted actionable task remain visible.
+export const suppressUnclassifiedNotice = job => !job.markerSeen
+  || job.feedbackDisposition !== 'actionable' || job.completionDisposition === 'silent';
 
 // Only execution/public-message metadata renews the inactivity timer. Token
 // counters, file mtimes and hidden reasoning are not evidence of task progress.
@@ -82,6 +88,7 @@ export class DurableInbox {
     if (typeof id !== 'string' || !/^om_[A-Za-z0-9_-]+$/.test(id)) throw new Error('invalid_message_id');
     if (this.jobs.has(id)) return this.jobs.get(id);
     const job = { id, event, status: 'queued', acceptedAt: this.now(), attempts: 0,
+      dispatchLane: acceptedDispatchLane(event, this.io.dependencyKey?.(event)),
       sequence: Math.max(0,...[...this.jobs.values()].map(j=>j.sequence??0))+1 };
     this.save(job); this.jobs.set(id, job);
     this.io.onQueued?.(); // Wake only after the private durable accept succeeds.
@@ -89,11 +96,12 @@ export class DurableInbox {
   }
   async dispatchOne() {
     if (this.dispatching) return false;
-    const j = [...this.jobs.values()].find(j => j.status === 'queued');
-    if (!j || (j.retryAt ?? 0) > this.now()) return false;
+    const j = nextDispatchJob(this.jobs.values(), this.now(), this.io.dispatchContextVerified);
+    if (!j) return false;
     this.dispatching = true;
     try {
-      // Preserve image/text context order while transient preparation retries.
+      // Preparation remains serialized; only independent pending lanes may pass
+      // an earlier lane's preparation backoff.
       let targetResult;
       if(this.io.parallelPreparation?.(j.event)) {
         // Opt in only for unambiguous text reads. Both operations are reads;
@@ -105,6 +113,11 @@ export class DurableInbox {
         if(results[0].status==='rejected')throw results[0].reason;
         targetResult=results[1];
       } else j.prepared ??= await this.io.prepare(j.event);
+      if (hasPriorDispatchDependency(this.jobs.values(), j, this.io.dispatchContextVerified)) {
+        // A native context lookup may discover an omitted reply/thread relation.
+        // Retain preparation, then let the next dispatch choose another lane.
+        this.save(j); return true;
+      }
       // Native voice confirmation is a local user interaction. No unconfirmed
       // transcript reaches the model; its handler resumes this same durable job.
       if(j.prepared.bridgeDisposition==='waiting_input') {
@@ -259,13 +272,30 @@ export class DurableInbox {
       if (j.notice) {
         j.noticeRetry ??= {};
         if (!j.noticeRetry.blocked && (j.noticeRetry.retryAt ?? 0) <= this.now()) {
-          try { await this.io.send(j.notice, digest(`notice:${j.id}:${j.notice}`),{jobId:j.id,job:j}); delete j.notice; delete j.noticeRetry; }
-          catch (error) { recordFailure(j.noticeRetry, error, this.now()); }
+          const notice=j.notice,retry=j.noticeRetry;
+          // Rollout scanning can cancel or replace this warning during network
+          // I/O. Its old result must not clear or revive a newer warning.
+          const current=()=>j.notice===notice && j.noticeRetry===retry;
+          try {
+            await (this.io.notice ?? this.io.send)(notice, digest(`notice:${j.id}:${notice}`),
+              {jobId:j.id,job:j,streamKey:j.streamKey,terminal:j.status==='failed'});
+            if(current()){delete j.notice; delete j.noticeRetry; delete j.noticeSuppressed;}
+          }
+          catch (error) { if(current())recordFailure(retry, error, this.now()); }
           this.save(j);
         }
       }
-      if (j.status !== 'reply_pending') continue;
+      // Upgrade recovery: older versions marked late peers done as soon as
+      // the shared answer receipt existed, leaving their visible cards open.
+      const recoverCard=j.status==='done' && this.io.closeReplyCards && j.markerSeen && j.streamKey && j.replyKey
+        && j.replyCardsClosedAt===undefined && j.completionDisposition!=='silent' && !j.unclassifiedTurnEnded
+        && (!this.io.classifiedFeedback || j.event?.synthetic_callback || j.feedbackDisposition==='actionable');
+      if (j.status !== 'reply_pending' && !recoverCard) continue;
       const receipt = path.join(this.dir, `sent-${j.replyKey}.json`);
+      if(recoverCard) {
+        if(!fs.existsSync(receipt))continue; // Never replay an old business answer.
+        j.status='reply_pending';delete j.completedAt;this.save(j);
+      }
       if (!fs.existsSync(receipt)) {
         const retryFile = path.join(this.dir, `reply-retry-${j.replyKey}.json`);
         j.replyRetry = fs.existsSync(retryFile) ? JSON.parse(fs.readFileSync(retryFile, 'utf8')) : (j.replyRetry ?? {});
@@ -276,6 +306,16 @@ export class DurableInbox {
           await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys, {jobId:j.id,replyKey:j.replyKey,jobs:peers});
           atomicJson(receipt, { sentAt: this.now() });
         } catch (error) { recordFailure(j.replyRetry, error, this.now()); atomicJson(retryFile,j.replyRetry); this.save(j); continue; }
+      }
+      // A reply receipt deduplicates the answer, not the per-message cards.
+      // Late rollout cursors discover peers after that receipt was committed.
+      if(this.io.closeReplyCards && j.streamKey && j.replyCardsClosedAt===undefined) {
+        j.replyCardRetry??={};
+        if(j.replyCardRetry.blocked || (j.replyCardRetry.retryAt??0)>this.now())continue;
+        try {
+          await this.io.closeReplyCards(j.replyKey,[j.streamKey],{jobId:j.id,replyKey:j.replyKey,jobs:[j]});
+          j.replyCardsClosedAt=this.now();delete j.replyCardRetry;
+        } catch(error) {recordFailure(j.replyCardRetry,error,this.now());this.save(j);continue;}
       }
       j.status = 'done'; j.completedAt = this.now(); delete j.reply; delete j.replyRetry;
       this.save(j); this.io.log?.('inbox_reply_sent', { bot: this.bot, messageId: j.id });
@@ -288,7 +328,7 @@ export class DurableInbox {
       awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
       failed_count: count(['failed']), completed_count: count(['done']), silent_completed_count:all.filter(j=>j.status==='done' && j.completionDisposition==='silent').length, actionable_count:all.filter(j=>j.feedbackDisposition==='actionable').length, waiting_input_count: count(['waiting_input']),
       watch_error_count: all.filter(j=>j.error==='rollout_read_failed').length,
-      outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
+      outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.replyCardRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
       oldest_queued_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'queued').map(j => (this.now()-j.acceptedAt)/1000))),
       oldest_pending_seconds: Math.round(Math.max(0, ...all.filter(j => j.status !== 'done' && j.status !== 'failed').map(j => (this.now()-j.acceptedAt)/1000))),
       oldest_undelivered_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'submitted').map(j => (this.now()-j.submittedAt)/1000))),

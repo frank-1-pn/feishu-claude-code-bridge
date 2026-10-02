@@ -4,8 +4,28 @@ import {bindingSnapshot,isBoundJob} from './codex-bridge-ux.mjs';
 const invalid=code=>Object.assign(Error(code),{code,permanent:true});
 const nativeId=value=>typeof value==='string'&&/^om_[A-Za-z0-9_-]+$/.test(value)&&!value.startsWith('om_cb_');
 const topicId=value=>typeof value==='string'&&/^(?:om|omt)_[A-Za-z0-9_-]+$/.test(value);
-const digestContext=(binding,event)=>digest(JSON.stringify(['native-context-v2',bindingSnapshot(binding),event.message_id??event.id,
-  event.thread_id??null,event.root_id??null,event.parent_id??null]));
+const digestContext=(binding,event)=>digest(JSON.stringify(['native-context-v3',bindingSnapshot(binding),event.message_id??event.id,
+  event.chat_id,event.sender_id,event.thread_id??null,event.root_id??null,event.parent_id??null]));
+
+export function nativeContextVerified(binding,event) {
+  return !!event && isBoundJob(binding,{id:event.message_id??event.id,event})
+    && event.native_context_verified===digestContext(binding,event);
+}
+
+// The digest detects changed context; it is not an authentication secret. Only
+// a receipt written by the local preparation flow permits using it for bypass.
+export function dispatchNativeContextVerified(binding,job) {
+  return job?.dispatchContext?.version===1 && nativeContextVerified(binding,job.event)
+    && job.dispatchContext.proof===job.event.native_context_verified;
+}
+
+export async function prepareDispatchNativeContext(binding,job,request) {
+  const source={...job.event};
+  if(!dispatchNativeContextVerified(binding,job))delete source.native_context_verified;
+  const event=await hydrateNativeContext(binding,source,request);
+  return {event,dispatchContext:nativeContextVerified(binding,event)
+    ?{version:1,proof:event.native_context_verified}:null};
+}
 function verifyMessage(binding,id,message,sourceSender=binding.allowed_sender_id){
   if(message?.message_id!==id)throw invalid('native_context_message_mismatch');
   const senders=[message.sender_id,message.sender?.open_id,message.sender?.sender_id?.open_id,
@@ -28,7 +48,7 @@ export async function hydrateNativeContext(binding,event,request){
   if(!isBoundJob(binding,{id,event}))throw invalid('native_context_binding_mismatch');
   if(event.synthetic_callback)return event;
   if(!nativeId(id))throw invalid('native_context_source_invalid');
-  if(event.native_context_verified===digestContext(binding,event))return event;
+  if(nativeContextVerified(binding,event))return event;
   let response;
   try{response=await request(binding,['im','+messages-mget','--message-ids',id,'--format','json']);}
   catch{return event;}

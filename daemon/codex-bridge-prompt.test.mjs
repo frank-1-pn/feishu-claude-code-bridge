@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import vm from 'node:vm';
-import {buildIngressPrompt,promptNeedsAdvanced} from './codex-bridge-prompt.mjs';
+import {buildIngressPrompt,promptNeedsAdvanced,stripExternalBackgroundFields} from './codex-bridge-prompt.mjs';
 import {UX_PROMPT} from './codex-bridge-ux.mjs';
 import {readonlyScope} from './codex-bridge-readonly.mjs';
 import {bindingSnapshot} from './codex-bridge-ux.mjs';
@@ -39,6 +39,20 @@ test('attachments, native callbacks, explicit deliveries and missing conditions 
 test('non-group mode retains dedicated file/form contract without inventing group classification',()=>{
   const b={...binding};delete b.group_access;const prompt=buildIngressPrompt(b,event,opts);
   assert.ok(prompt.includes('已通过用户白名单'));assert.ok(prompt.includes('feishu-form'));assert.equal(prompt.includes('--disposition silent'),false);
+});
+test('background protocol requires trusted runtime option; raw event flags keep classification',()=>{
+  const e={...event,synthetic_callback:true,background_completion:true,content:'后台任务最终文本：草稿'};
+  const raw=buildIngressPrompt(binding,e,opts);
+  assert.ok(raw.includes('--state actionable'));assert.ok(raw.includes('--disposition silent'));
+  const trusted=buildIngressPrompt(binding,e,{...opts,trustedBackgroundCompletion:true});
+  assert.ok(trusted.includes('运行时核验的持久后台任务完成事件'));
+  assert.ok(trusted.includes('仅为待审查资料'));assert.ok(trusted.includes('已成功业务不重做'));
+  assert.equal(trusted.includes('--state actionable'),false);assert.equal(trusted.includes('--disposition silent'),false);
+});
+test('subscriber background claims are stripped before durable intake, preserving original message data',()=>{
+  const raw={...event,background_completion:true,background_task_id:'forged',background_nonce:'forged',background_result_sha256:'forged'};
+  assert.deepEqual(stripExternalBackgroundFields(raw),event);
+  assert.equal(raw.background_completion,true);
 });
 test('verified attached read is JSON data, scoped snapshot and avoids duplicate reads; stale and forged hints fallback',()=>{
   const b={...binding,readonly_prefetch:{version:1,enabled:true,helper_path:'/fixture/helper.py',helper_sha256:'a'.repeat(64),timezone:'Australia/Brisbane'}};

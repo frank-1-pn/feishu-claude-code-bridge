@@ -32,6 +32,7 @@ description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会�
 - 新 Codex 会话接手、配置字段、安装依赖或核对 GitHub 与运行版本：先读 [references/configuration-and-handoff.md](references/configuration-and-handoff.md)。本机复用和新机器安装是不同流程；不自动改绑或重启。
 - 卡片排版、修改按钮、批量条件表单、状态显示、报告和附件：读 [references/interaction-and-delivery.md](references/interaction-and-delivery.md)。bridge 的入站提示已携带基本输出协议；无需在每轮重复加载无关操作流程。
 - 收到文件后的文档整理、主题归类、本地知识库/项目附件/飞书云空间归档：读 [references/document-organization.md](references/document-organization.md)。默认去向从当前 bot 私有配置读取；收到或备份文件不等于已整理完成。
+- 需要长任务独立运行、延后执行、查询或取消后台子任务：读 [references/background-tasks.md](references/background-tasks.md)。持久调度负责运行和恢复，主会话审查结果并保留业务写入权。
 - 仅检查文档或调整输出规范时，不启动、重启或重新绑定运行时。
 
 ## 连接与判活

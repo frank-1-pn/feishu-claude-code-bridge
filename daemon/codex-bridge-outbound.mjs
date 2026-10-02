@@ -51,6 +51,41 @@ export class DurableOutbound {
       }
     });
   }
+  async notice(text, key, {streamKey, route, terminal=false, jobId} = {}) {
+    const clean=sanitizeFeishuReply(text).trim();
+    const handled=await this.serial(async()=>{
+      const receipt=this.file('notice',key);
+      if(this.read(receipt)?.delivered)return true;
+      const file=streamKey && this.file('card',streamKey),s=file && this.read(file);
+      if(!s)return false;
+      // A business answer owns the card once its final intent is committed.
+      // Same-warning retries may close a fault card only before that handoff.
+      if(s.finalDelivered || s.finalReplyKey || s.finalClosedReplyKey
+          || ((s.final || s.cardClosed) && s.noticeKey!==key))return true;
+      if(s.noticeKey!==key) {
+        s.noticeKey=key;s.text=clean;s.revision++;
+        s.jobId??=jobId;
+        s.presentation={...s.presentation,status:terminal?'error':'working',interactions:[]};
+        delete s.presentation.actionContext;delete s.presentation.nativeContext;
+        if(terminal)s.final=true;
+        atomicWriteJson(file,s);
+      }
+      try { await this.updateCard(file,s,terminal); }
+      catch(error) {
+        const latest=this.read(file,s);
+        // A definite rejection of an existing-card patch can use a safe text
+        // warning. Unknown creation/delivery must keep its original route/key.
+        if(error.deliveryUncertain || !latest.messageId || classifyFailure(error).kind!=='permanent')throw error;
+        recordFailure(latest,error,this.now());latest.noticeCardFailed=true;atomicWriteJson(file,latest);
+        return false;
+      }
+      // This receipt acknowledges only the bridge warning, never a business
+      // answer. The inbox stays failed, or watched for a late final on timeout.
+      atomicWriteJson(receipt,{delivered:true,deliveredAt:this.now(),terminal});
+      return true;
+    });
+    if(!handled)await this.text(clean,key,route);
+  }
   progress(text, key, route, metadata = {}) {
     const file = this.file('card', key);
     const s = this.read(file, { key, revision: 0, ...(route?{route}:{}) });
@@ -147,6 +182,11 @@ export class DurableOutbound {
   }
   async final(text, replyKey, streamKeys = [], presentation) {
     const clean = sanitizeFeishuReply(text).trim() || '本次没有可发送的正文。';
+    const replyFile=this.file('reply',replyKey);
+    if(this.replyDelivered(replyKey)) {
+      if(!fs.existsSync(replyFile))atomicWriteJson(replyFile,{deliveredAt:this.now(),status:this.replyStatus(replyKey)});
+      await this.closeReplyCards(replyKey,streamKeys);return;
+    }
     let delivered = false;
     let keys=[...new Set(streamKeys)];
     const route=presentation?.replyRoute;
@@ -196,6 +236,59 @@ export class DurableOutbound {
       });
     }
     if (!delivered) await this.text(presentation?.fallbackText??clean, replyKey,route);
+    atomicWriteJson(replyFile,{deliveredAt:this.now(),status:presentation?.status??'complete'});
+  }
+
+  replyDelivered(replyKey) {
+    // Recover the crash gap between a successful card/text delivery and its
+    // aggregate receipt, even if the next scan discovers an earlier peer.
+    if(this.read(this.file('reply',replyKey))?.deliveredAt!==undefined)return true;
+    const textState=this.read(this.file('text',replyKey));
+    if(textState?.parts?.length>0 && textState.next===textState.parts.length)return true;
+    return fs.readdirSync(this.root).filter(n=>/^card-[a-f0-9]+\.json$/.test(n)).some(name=>{
+      const card=this.read(path.join(this.root,name));return card.finalReplyKey===replyKey && card.finalDelivered;
+    });
+  }
+
+  replyStatus(replyKey) {
+    const receipt=this.read(this.file('reply',replyKey));
+    if(receipt?.status)return receipt.status;
+    for(const name of fs.readdirSync(this.root).filter(n=>/^card-[a-f0-9]+\.json$/.test(n))) {
+      const card=this.read(path.join(this.root,name));
+      if(card.finalReplyKey===replyKey && card.finalDelivered)return card.presentation?.status??'complete';
+    }
+    return 'complete';
+  }
+
+  async closeReplyCards(replyKey,streamKeys=[]) {
+    const status=this.replyStatus(replyKey);
+    for(const key of new Set(streamKeys))await this.serial(async()=>{
+      const file=this.file('card',key),s=this.read(file);
+      if(!s)return; // No initial/progress intent; never create a late card.
+      if(s.finalReplyKey && s.finalReplyKey!==replyKey)
+        throw Object.assign(Error('card_reply_key_changed'),{permanent:true});
+      if(s.finalClosedReplyKey===replyKey)return;
+      if(s.final && s.finalReplyKey===replyKey && s.sentRevision===s.revision) {
+        s.finalClosedReplyKey=replyKey;s.finalClosedAt=this.now();atomicWriteJson(file,s);return;
+      }
+      if(s.deliveryUncertain)throw Object.assign(Error('card_delivery_uncertain'),{permanent:true,deliveryUncertain:true});
+      if(s.messageId && s.blocked)throw Object.assign(Error('card_close_blocked'),{permanent:true,code:s.error});
+      // The answer has already been delivered. This lane only patches the
+      // existing source card and never recreates actions or repeats the answer.
+      s.final=true;s.finalReplyKey=replyKey;s.text=status==='waiting'?'等待补充，完整答复已发送。':'处理完成，完整答复已发送。';
+      s.presentation={...s.presentation,status,interactions:[]};
+      delete s.presentation.actionContext;delete s.presentation.nativeContext;
+      s.revision++;atomicWriteJson(file,s);
+      if(s.messageId) {
+        try {await this.updateCard(file,s,true);}
+        catch(error) {
+          const latest=this.read(file);recordFailure(latest,error,this.now());
+          if(error.deliveryUncertain)latest.deliveryUncertain=true;
+          latest.finalCardFailed=true;atomicWriteJson(file,latest);throw error;
+        }
+      }
+      const latest=this.read(file);latest.finalClosedReplyKey=replyKey;latest.finalClosedAt=this.now();atomicWriteJson(file,latest);
+    });
   }
 
   interactive(card,key,{route,onMessage,renderVersion=1}={}) {

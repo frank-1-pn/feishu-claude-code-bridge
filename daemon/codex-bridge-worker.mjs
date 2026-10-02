@@ -33,7 +33,7 @@ import {
   rolloutTaskCompletion,
 } from './codex-bridge-progress.mjs';
 import { sanitizeFeishuReply } from './codex-bridge-sanitize.mjs';
-import { DurableInbox, digest } from './codex-bridge-inbox.mjs';
+import { DurableInbox, digest, suppressUnclassifiedNotice } from './codex-bridge-inbox.mjs';
 import { prepareInbound } from './codex-bridge-media.mjs';
 import { atomicWriteJson, atomicWriteText, createStatusPublisher } from './codex-bridge-storage.mjs';
 import { createLarkTransport, resolveLarkAppId } from './codex-bridge-lark.mjs';
@@ -46,9 +46,10 @@ import { createReplyDelivery } from './codex-bridge-delivery.mjs';
 import { DurableReplyRouter, selectReplyRoute } from './codex-bridge-reply-routing.mjs';
 import { NativeInteractions } from './codex-bridge-native-runtime.mjs';
 import { CloudDocOutbox } from './codex-bridge-cloud-docs.mjs';
-import { hydrateNativeContext } from './codex-bridge-native-context.mjs';
+import { prepareDispatchNativeContext, dispatchNativeContextVerified } from './codex-bridge-native-context.mjs';
 import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
-import {buildIngressPrompt} from './codex-bridge-prompt.mjs';
+import {buildIngressPrompt,stripExternalBackgroundFields} from './codex-bridge-prompt.mjs';
+import {BackgroundScheduler,verifyBackgroundCompletion} from './codex-bridge-background.mjs';
 import {prepareReadonlyInput,readonlyEligible,validateReadonlyConfig,verifiedReadonly} from './codex-bridge-readonly.mjs';
 import {DeferredPerformance} from './codex-bridge-performance.mjs';
 import {WakeSignal,EventFileWakeup} from './codex-bridge-wakeup.mjs';
@@ -1170,13 +1171,20 @@ async function durableBotLoops(binding) {
     reportRoot:path.join(DAEMON_DIR,'state','reports-v1'),fileOutboxRoot:path.join(DAEMON_DIR,'state','file-outbox'),inboxRoot:INBOX_ROOT,
   }});
   const performance=new DeferredPerformance(path.join(DAEMON_DIR,'state','performance-v1'),{onError:category=>log(category,{bot:binding.bot})});
+  const backgroundRoot=path.join(DAEMON_DIR,'state','background-v1');
   inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
     onQueued:()=>dispatchWake.signal(),
+    dispatchContextVerified:(_event,_prepared,job)=>dispatchNativeContextVerified(binding,job),
     parallelPreparation:event=>readonlyEligible(binding,event),
     prepare: async event => {
-      const hydrated=await hydrateNativeContext(binding,event,contextRequest);
       const job=inbox.jobs.get(event.message_id??event.id);
-      const candidate={...job,event:hydrated};inbox.save(candidate);Object.assign(job,candidate);
+      if(event.background_completion===true) {
+        if(!verifyBackgroundCompletion(binding,event,backgroundRoot))
+          throw Object.assign(Error('background_completion_unverified'),{permanent:true});
+        return event;
+      }
+      const context=await prepareDispatchNativeContext(binding,job,contextRequest),hydrated=context.event;
+      const candidate={...job,...context};inbox.save(candidate);Object.assign(job,candidate);
       return prepareReadonlyInput(binding,hydrated,e=>nativeInteractions.prepare(e),{children:activeChildren});
     },
     target: async () => {
@@ -1186,7 +1194,11 @@ async function durableBotLoops(binding) {
       return { pty, rollout: findRolloutPath(binding.codex_thread_id) };
     },
     inject: async (job,target) => {
-      const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now});
+      const trustedBackgroundCompletion=job.prepared.background_completion===true
+        && verifyBackgroundCompletion(binding,job.prepared,backgroundRoot);
+      if(job.prepared.background_completion===true && !trustedBackgroundCompletion)
+        throw Object.assign(Error('background_completion_unverified'),{permanent:true});
+      const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now,trustedBackgroundCompletion});
       job.readonlyPrefetchIncluded=!!verifiedReadonly(binding,job.prepared,now)?.result;
       inbox.save(job);
       if(target.pty?.transport==='managed_app_server') {
@@ -1202,8 +1214,10 @@ async function durableBotLoops(binding) {
       }
     },
     send: (text,key,context) => outbound.text(text,key,getRoute(context)),
+    notice: (text,key,context) => outbound.notice(text,key,{...context,route:getRoute(context)}),
     final,
-    suppressNotices: () => binding.group_access==='all_group_humans',
+    closeReplyCards: final.closeCards,
+    suppressNotices: job => binding.group_access==='all_group_humans' && suppressUnclassifiedNotice(job),
     classifiedFeedback: binding.group_access==='all_group_humans',
     initialFeedbackCard: binding.initial_feedback_card===true,
     classification: job => classifyWithFastFeedback({root:path.join(DAEMON_DIR,'state','completions-v1'),inboxRoot:INBOX_ROOT,binding,job}),
@@ -1217,6 +1231,8 @@ async function durableBotLoops(binding) {
     },
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
+  const background=new BackgroundScheduler({root:backgroundRoot,inboxRoot:INBOX_ROOT,binding,inbox,
+    codexCliJs:config.runtime.codex_cli_js,codexHome:config.runtime.codex_home});
   // Private pending jobs are tied to the originating mapping. Rebinding a bot
   // must not replay an old job or publish its answer into a different session.
   for(const job of inbox.jobs.values()) {
@@ -1264,7 +1280,7 @@ async function durableBotLoops(binding) {
       }
       if (event && record.lineBytes.length<=config.runtime.max_inbound_bytes && isAuthorizedEvent(binding,event) && isFreshEvent(event)) {
         const id=event.message_id??event.id;
-        if(!seenIds.includes(id)) inbox.enqueue({...event,bridge_binding:bindingSnapshot(binding)});
+        if(!seenIds.includes(id)) inbox.enqueue({...stripExternalBackgroundFields(event),bridge_binding:bindingSnapshot(binding)});
       }
       if(!writeOffset(binding,record.offset,record.nextOffset,record.originalBytes)) break;
       if(i===99)intakeWake.signal(); // Drain a burst without waiting for a new fs event.
@@ -1292,15 +1308,17 @@ async function durableBotLoops(binding) {
       if(card.firstCardSentAt!==undefined)inbox.recordFeedbackTiming(job.id,'firstCardSentAt',card.firstCardSentAt,card.firstCardTimingSource);
     }
     const stats=inbox.stats();
-    const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
+    const backgroundStats=background.stats();
+    const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count
+      +backgroundStats.background_queued_count+backgroundStats.background_running_count+backgroundStats.background_result_pending_count;
     const fileStats=files.stats();
     const actionStats=actions.stats();
     const nativeStats=nativeInteractions.actions.stats();
     const reactionStats=reactions?.stats()??{reaction_blocked_count:1,reaction_last_error:'state_unavailable'};
-    updateBotStatus(binding.bot,{...stats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
+    updateBotStatus(binding.bot,{...stats,...backgroundStats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
       voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
-      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked?'degraded':busy?'processing':'idle',
+      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked||backgroundStats.background_blocked_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };
@@ -1311,6 +1329,7 @@ async function durableBotLoops(binding) {
     loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000),
     loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),
     loop('reactions',()=>reactions?.flush(),1000),
+    loop('background',()=>background.tick(),1000),
     loop('performance',()=>performance.observe(binding.bot,inbox.jobs.values()),1000)]);
   } finally {for(const resource of resources){resource.close();runtimeResources.delete(resource);}}
 }
