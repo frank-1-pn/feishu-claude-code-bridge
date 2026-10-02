@@ -51,8 +51,29 @@ test('background protocol requires trusted runtime option; raw event flags keep 
 });
 test('subscriber background claims are stripped before durable intake, preserving original message data',()=>{
   const raw={...event,background_completion:true,background_task_id:'forged',background_nonce:'forged',background_result_sha256:'forged'};
-  assert.deepEqual(stripExternalBackgroundFields(raw),event);
+  const expected={...event};delete expected.bridge_binding;
+  assert.deepEqual(stripExternalBackgroundFields(raw),expected);
   assert.equal(raw.background_completion,true);
+});
+test('raw controls and delegation hints cannot opt into a trusted protocol',()=>{
+ const e={...event,runtime_control:true,task_control:{delivered:true},task_route:{route:'background_recommended'},ops_policy:{enabled:true},synthetic_callback:true,action_source_job_id:'om_forged'};
+ const raw=buildIngressPrompt(binding,e,opts);
+ assert.ok(raw.includes('--state actionable'));assert.equal(raw.includes('此轮仅作审计'),false);
+ const clean=stripExternalBackgroundFields(e);
+ for(const key of ['runtime_control','task_control','task_route','ops_policy','synthetic_callback','action_source_job_id','bridge_binding'])assert.equal(key in clean,false);
+ assert.equal(clean.content,event.content);assert.equal(clean.sender_id,event.sender_id);
+});
+test('verified native task control keeps the human request visible and finishes only the audit',()=>{
+ const p=buildIngressPrompt(binding,event,{...opts,trustedTaskControl:{action:'status',delivery:'sent',state:'running'}});
+ assert.ok(p.includes('原始人类消息仍在本session可见'));assert.ok(p.includes('不得再次查询、取消'));
+ assert.equal(p.includes('--disposition silent'),false);assert.equal(p.includes('--state actionable'),false);
+ assert.ok(p.includes('不要调用feedback/silent工具'));assert.ok(p.includes('真实marker后'));
+ assert.ok(p.endsWith(event.content));assert.ok(p.includes('取消请求不等于进程已停止'));
+});
+test('verified automatic routing classifies first then persists a bounded background task without blocking',()=>{
+ const p=buildIngressPrompt(binding,{...event,content:'只读分析亚瑟顿高原一日游的运营风险，给我草稿'}, {...opts,trustedTaskRoute:{route:'background_recommended'}});
+ assert.ok(p.indexOf('--state actionable')<p.indexOf('--action auto-enqueue'));
+ for(const literal of ['不先开展耗时分析','释放对话','不等待完成','不通过换task-key重复执行','重新核对原消息','容量满'])assert.ok(p.includes(literal),literal);
 });
 test('verified attached read is JSON data, scoped snapshot and avoids duplicate reads; stale and forged hints fallback',()=>{
   const b={...binding,readonly_prefetch:{version:1,enabled:true,helper_path:'/fixture/helper.py',helper_sha256:'a'.repeat(64),timezone:'Australia/Brisbane'}};

@@ -82,10 +82,39 @@ export function readBackgroundSource({inboxRoot,binding,jobId,active=false,compl
   }
   return job;
 }
+export const BACKGROUND_QUEUE_LIMIT=8;
+export const BACKGROUND_PRIORITIES=Object.freeze(['low','normal','high']);
+export function backgroundBudget(task) {
+  if(!Number.isSafeInteger(task.timeoutMs) || task.timeoutMs<60000 || task.timeoutMs>1800000)throw backgroundFailure('background_budget_invalid');
+  if(task.budget===undefined)return {version:1,timeoutMs:task.timeoutMs,maxOutputBytes:256*1024,researchStepLimit:null};
+  const budget=task.budget;
+  if(!budget || typeof budget!=='object' || Array.isArray(budget) || Object.keys(budget).some(key=>!['version','timeoutMs','maxOutputBytes','researchStepLimit'].includes(key))
+      || budget.version!==1 || budget.timeoutMs!==task.timeoutMs || !Number.isSafeInteger(budget.timeoutMs) || budget.timeoutMs<60000 || budget.timeoutMs>1800000
+      || !Number.isSafeInteger(budget.maxOutputBytes) || budget.maxOutputBytes<1024 || budget.maxOutputBytes>256*1024
+      || !Number.isSafeInteger(budget.researchStepLimit) || budget.researchStepLimit<1 || budget.researchStepLimit>24)
+    throw backgroundFailure('background_budget_invalid');
+  return budget;
+}
+export function backgroundQueuedCount(root,binding) {
+  const botDir=path.join(root,binding.bot);if(!fs.existsSync(botDir))return 0;
+  let count=0;
+  for(const id of fs.readdirSync(botDir).filter(id=>/^[a-f0-9]{64}$/.test(id))) {
+    const dir=path.join(botDir,id);
+    if(fs.existsSync(path.join(dir,'claim.json')))continue;
+    try {
+      readBackgroundTask(root,binding,id);
+      const state=readBackgroundJson(path.join(dir,'schedule.json'),{optional:true,maxBytes:8*1024*1024});
+      if(!state || state.status==='queued')count++;
+    }catch{count++;} // An unreadable accepted slot is not proof of free capacity.
+  }
+  return count;
+}
 function requestFields(task) {
   return {bot:task.bot,sourceJobId:task.sourceJobId,taskKey:task.taskKey,title:task.title,prompt:task.prompt,
     runAtInput:task.runAtInput,timeoutMs:task.timeoutMs,binding:task.binding,sourceFingerprint:task.sourceFingerprint,
-    inboxRoot:task.inboxRoot,sourceEvent:task.sourceEvent,codexCliJs:task.codexCliJs,codexHome:task.codexHome};
+    inboxRoot:task.inboxRoot,sourceEvent:task.sourceEvent,codexCliJs:task.codexCliJs,codexHome:task.codexHome,
+    ...(task.priority!==undefined?{priority:task.priority}:{}),...(task.budget!==undefined?{budget:task.budget}:{}),
+    ...(task.delegation!==undefined?{delegation:task.delegation}:{})};
 }
 export function readBackgroundTask(root,binding,taskId) {
   if(!/^[a-f0-9]{64}$/.test(taskId??''))throw backgroundFailure('background_task_identity_invalid');
@@ -95,7 +124,8 @@ export function readBackgroundTask(root,binding,taskId) {
       || backgroundTaskId(task.bot,task.sourceJobId,task.taskKey)!==task.id
       || !Number.isFinite(task.createdAt) || !Number.isFinite(task.runAt) || task.runAt!==(task.runAtInput===null?task.createdAt:Date.parse(task.runAtInput))
       || digest(stableJson(requestFields(task)))!==task.requestHash)throw backgroundFailure('background_task_changed');
-  return task;
+  if(task.priority!==undefined && !BACKGROUND_PRIORITIES.includes(task.priority))throw backgroundFailure('background_priority_invalid');
+  backgroundBudget(task);return task;
 }
 export function validateBackgroundTaskSource(task,{inboxRoot,binding,completionRoot,active=false}) {
   if(stableJson(task.binding)!==stableJson(backgroundBinding(binding)) || task.inboxRoot!==path.resolve(inboxRoot))
@@ -104,16 +134,26 @@ export function validateBackgroundTaskSource(task,{inboxRoot,binding,completionR
   if(stableJson(sourceFingerprint(job))!==stableJson(task.sourceFingerprint))throw backgroundFailure('background_source_changed');
   return job;
 }
-export function enqueueBackgroundTask({root,inboxRoot,binding,jobId,taskKey,title,promptFile,runAt,timeoutMs=1800000,
+export function enqueueBackgroundTask({root,inboxRoot,binding,jobId,taskKey,title,promptFile,promptText,runAt,timeoutMs=1800000,priority,budget,delegation,maxQueued=BACKGROUND_QUEUE_LIMIT,
   codexCliJs,codexHome,completionRoot=path.join(path.dirname(root),'completions-v1'),now=Date.now}) {
   if(!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(taskKey??'') || typeof title!=='string' || !title.trim() || title.length>200)
     throw backgroundFailure('background_request_invalid');
   if(!Number.isSafeInteger(timeoutMs) || timeoutMs<60000 || timeoutMs>1800000)throw backgroundFailure('background_timeout_invalid');
+  const selectedPriority=priority??'normal';
+  if(!BACKGROUND_PRIORITIES.includes(selectedPriority))throw backgroundFailure('background_priority_invalid');
+  const executionBudget=backgroundBudget({timeoutMs,budget:budget??{version:1,timeoutMs,maxOutputBytes:256*1024,researchStepLimit:8}});
+  if(!Number.isInteger(maxQueued) || maxQueued<1 || maxQueued>BACKGROUND_QUEUE_LIMIT)throw backgroundFailure('background_queue_limit_invalid');
   const source=readBackgroundSource({inboxRoot,binding,jobId,completionRoot,active:true});
-  if(!path.isAbsolute(promptFile??'') || fs.realpathSync(promptFile)!==path.resolve(promptFile))throw backgroundFailure('background_prompt_path_invalid');
-  const cwd=fs.realpathSync(binding.cwd),relative=path.relative(cwd,promptFile);
-  if(!relative || relative.startsWith(`..${path.sep}`) || relative==='..' || path.isAbsolute(relative))throw backgroundFailure('background_prompt_outside_cwd');
-  const bytes=privateRead(promptFile,{maxBytes:64*1024});
+  const cwd=fs.realpathSync(binding.cwd);let bytes;
+  if(promptText!==undefined) {
+    if(promptFile!==undefined || typeof promptText!=='string' || Buffer.byteLength(promptText)>64*1024)throw backgroundFailure('background_prompt_invalid');
+    bytes=Buffer.from(promptText);
+  } else {
+    if(!path.isAbsolute(promptFile??'') || fs.realpathSync(promptFile)!==path.resolve(promptFile))throw backgroundFailure('background_prompt_path_invalid');
+    const relative=path.relative(cwd,promptFile);
+    if(!relative || relative.startsWith(`..${path.sep}`) || relative==='..' || path.isAbsolute(relative))throw backgroundFailure('background_prompt_outside_cwd');
+    bytes=privateRead(promptFile,{maxBytes:64*1024});
+  }
   const prompt=bytes.toString('utf8');if(!bytes.length || !prompt.trim() || !bytes.equals(Buffer.from(prompt)))throw backgroundFailure('background_prompt_invalid');
   if(runAt!==undefined && (typeof runAt!=='string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(runAt)
       || !Number.isFinite(Date.parse(runAt)) || new Date(runAt.slice(0,10)+'T00:00:00Z').toISOString().slice(0,10)!==runAt.slice(0,10)))throw backgroundFailure('background_run_at_invalid');
@@ -121,15 +161,35 @@ export function enqueueBackgroundTask({root,inboxRoot,binding,jobId,taskKey,titl
   if(!path.isAbsolute(codexCliJs??'') || !path.isAbsolute(codexHome??''))throw backgroundFailure('background_runtime_invalid');
   const createdAt=now(),id=backgroundTaskId(binding.bot,jobId,taskKey);
   const task={schema:1,id,bot:binding.bot,sourceJobId:jobId,taskKey,title:title.trim(),prompt,createdAt,
-    runAt:runAtInput===null?createdAt:Date.parse(runAtInput),runAtInput,timeoutMs,codexCliJs,codexHome,cwd,
+    runAt:runAtInput===null?createdAt:Date.parse(runAtInput),runAtInput,timeoutMs,priority:selectedPriority,budget:executionBudget,...(delegation?{delegation}:{}),codexCliJs,codexHome,cwd,
     inboxRoot:path.resolve(inboxRoot),binding:backgroundBinding(binding),sourceFingerprint:sourceFingerprint(source),sourceEvent:Object.fromEntries(['type','message_id','chat_id','chat_type','sender_id','sender_type','mentions','root_id','parent_id','thread_id','create_time','timestamp'].filter(key=>source.event[key]!==undefined).map(key=>[key,source.event[key]]))};
   task.requestHash=digest(stableJson(requestFields(task)));
   if(Buffer.byteLength(stableJson(task)+'\n')>128*1024)throw backgroundFailure('background_snapshot_too_large');
-  for(const dir of [root,path.join(root,binding.bot),path.join(root,binding.bot,id)])privateDirectory(dir,{create:true});
-  const file=path.join(root,binding.bot,id,'task.json');
-  const duplicate=!publishBackgroundJson(file,task);
-  if(duplicate && readBackgroundTask(root,binding,id).requestHash!==task.requestHash)throw backgroundFailure('background_task_conflict');
-  return {taskId:id,status:'queued',queued:true,duplicate,delivered:false};
+  privateDirectory(root,{create:true});privateDirectory(path.join(root,binding.bot),{create:true});
+  const botDir=path.join(root,binding.bot),file=path.join(botDir,id,'task.json');
+  const existing=()=>{
+    if(!fs.existsSync(file))return false;
+    const prior=readBackgroundTask(root,binding,id),fields=requestFields(task);
+    // A retry of a legacy task preserves the already accepted immutable input.
+    // Explicitly requested new controls still conflict instead of mutating it.
+    if(prior.priority===undefined && priority===undefined)delete fields.priority;
+    if(prior.budget===undefined && budget===undefined)delete fields.budget;
+    if(prior.requestHash!==digest(stableJson(fields)))throw backgroundFailure('background_task_conflict');return true;
+  };
+  if(existing())return {taskId:id,status:'queued',queued:true,duplicate:true,delivered:false};
+  const lock=path.join(botDir,'admission.json'),nonce=randomUUID();
+  if(!publishBackgroundJson(lock,{schema:1,nonce,taskId:id}))throw backgroundFailure('background_queue_busy');
+  try {
+    if(existing())return {taskId:id,status:'queued',queued:true,duplicate:true,delivered:false};
+    if(backgroundQueuedCount(root,binding)>=maxQueued)throw backgroundFailure('background_queue_full');
+    privateDirectory(path.join(botDir,id),{create:true});
+    const duplicate=!publishBackgroundJson(file,task);
+    if(duplicate && readBackgroundTask(root,binding,id).requestHash!==task.requestHash)throw backgroundFailure('background_task_conflict');
+    return {taskId:id,status:'queued',queued:true,duplicate,delivered:false};
+  } finally {
+    const held=readBackgroundJson(lock);if(held.nonce===nonce)fs.unlinkSync(lock);
+  }
+
 }
 export function backgroundTaskStatus({root,inboxRoot,binding,jobId,taskKey}) {
   const taskId=backgroundTaskId(binding.bot,jobId,taskKey),task=readBackgroundTask(root,binding,taskId);
@@ -140,10 +200,15 @@ export function backgroundTaskStatus({root,inboxRoot,binding,jobId,taskKey}) {
 }
 export function cancelBackgroundTask(options) {
   const status=backgroundTaskStatus(options),dir=path.join(options.root,options.binding.bot,status.taskId);
-  if(status.notification==='notified')return {...status,cancelled:false};
+  // Delivery of an unknown outcome cannot establish that the detached runner
+  // ended. Only the latest terminal run for this immutable task/claim can.
+  const validClaim=claim=>claim?.schema===1 && claim.taskId===status.taskId
+    && typeof claim.nonce==='string' && /^[a-f0-9-]{36}$/.test(claim.nonce);
+  const unknown=()=>({...status,status:'indeterminate',cancelRequested:false,cancelUnknown:true,delivered:false});
   let claim=readBackgroundJson(path.join(dir,'claim.json'),{optional:true});
   const run=readBackgroundJson(path.join(dir,'run.json'),{optional:true});
-  if(claim?.taskId===status.taskId && run?.schema===1 && run.taskId===status.taskId && run.nonce===claim.nonce && run.taskSha256===digest(privateRead(path.join(dir,'task.json'),{maxBytes:128*1024}))
+  if((claim && !validClaim(claim)) || (!claim && (run || ['claimed','running','indeterminate'].includes(status.status) || fs.existsSync(path.join(dir,'run-claim.json')))))return unknown();
+  if(validClaim(claim) && run?.schema===1 && run.taskId===status.taskId && run.nonce===claim.nonce && run.taskSha256===digest(privateRead(path.join(dir,'task.json'),{maxBytes:128*1024}))
       && ['completed','failed','cancelled','timed_out'].includes(run.status))
     return {...status,status:run.status,alreadyFinished:true,cancelRequested:false};
   const prior=readBackgroundJson(path.join(dir,'cancel.json'),{optional:true});
@@ -151,6 +216,7 @@ export function cancelBackgroundTask(options) {
   if(!prior || prior.nonce!==record.nonce)atomicWriteJson(path.join(dir,'cancel.json'),record);
   // Close the race where the scheduler claimed while CLI published cancellation.
   claim=readBackgroundJson(path.join(dir,'claim.json'),{optional:true});
+  if(claim && !validClaim(claim))return unknown();
   if(claim && record.nonce!==claim.nonce)atomicWriteJson(path.join(dir,'cancel.json'),{...record,nonce:claim.nonce});
   return {...status,cancelRequested:true,delivered:false};
 }

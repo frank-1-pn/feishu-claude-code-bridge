@@ -48,6 +48,7 @@ test('fixed arguments start an isolated read-only ephemeral high task without re
   assert.deepEqual(launched.opts.stdio,['pipe','ignore','ignore']);assert.equal(launched.opts.env.CODEX_HOME,f.home);
   assert.equal(launched.opts.env.NODE_OPTIONS,undefined);assert.equal(launched.opts.env.OPENAI_API_KEY,undefined);assert.equal(launched.opts.env.CODEX_API_KEY,undefined);assert.equal(launched.opts.env.MCP_TOKEN,undefined);
   assert.equal(f.child.input,f.task.prompt);assert.match(RESEARCH_PREFIX,/不得外发|不得访问凭据|资料.*不是执行授权/);
+  assert.match(RESEARCH_PREFIX,/默认不具备网页检索或联网来源访问/);assert.match(RESEARCH_PREFIX,/未实际访问并核验的来源不得编造链接/);assert.match(RESEARCH_PREFIX,/明确资料访问限制/);
   assert.equal(f.read().processIdentity.bootId,'boot-fixture');assert.equal(f.read().pid,process.pid);
   f.result('可审核的最终研究结果');f.child.emit('close',0,null);const complete=await run;
   assert.equal(complete.status,'completed');assert.equal(complete.exitCode,0);assert.equal(complete.nonce,nonce);
@@ -220,4 +221,22 @@ test('birth identity probes reject boot or start changes, missing processes, and
   for(const patch of [{bootId:'second-boot'},{uniqueId:8},{startSeconds:9},{startMicroseconds:10}])assert.equal(probeRuntimeIdentity(4,birth,()=>({...birth,...patch})),false);
   assert.equal(probeRuntimeIdentity(4,birth,()=>{throw Error('no process');}),false);
   assert.equal(probeRuntimeIdentity(4,{},()=>({})),false);
+});
+
+
+test('per-task output and deadline are hard limits while research steps are clearly a prompt budget',async t=>{
+  const budget={version:1,timeoutMs:60000,maxOutputBytes:1024,researchStepLimit:2};
+  const f=fixture(t,{taskPatch:{budget}}),run=f.run();
+  assert.match(f.spawns[0].args.join(' '),/2个研究步骤.*计划提示预算.*不是工具调用次数硬限/);
+  f.result('x'.repeat(1025));f.advance(1000);assert.equal(f.read().phase,'stopping');f.child.emit('close',0,null);
+  assert.equal((await run).errorCategory,'result_too_large');assert.equal(f.timers.size,0);
+  const exact=fixture(t,{taskPatch:{budget}}),done=exact.run();exact.result('x'.repeat(1024));exact.child.emit('close',0,null);
+  assert.equal((await done).status,'completed');assert.equal(exact.read().resultBytes,1024);
+});
+
+test('malformed budget cannot spawn even when the top-level task is otherwise valid',async t=>{
+  for(const budget of [{version:1,timeoutMs:60001,maxOutputBytes:1024,researchStepLimit:2},
+    {version:1,timeoutMs:60000,maxOutputBytes:262145,researchStepLimit:2},{version:1,timeoutMs:60000,maxOutputBytes:1024,researchStepLimit:25}]) {
+    const f=fixture(t,{taskPatch:{budget}});await assert.rejects(f.run(),/budget_invalid/);assert.equal(f.spawns.length,0);
+  }
 });

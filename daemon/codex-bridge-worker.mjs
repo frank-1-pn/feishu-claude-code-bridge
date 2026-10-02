@@ -48,11 +48,12 @@ import { NativeInteractions } from './codex-bridge-native-runtime.mjs';
 import { CloudDocOutbox } from './codex-bridge-cloud-docs.mjs';
 import { prepareDispatchNativeContext, dispatchNativeContextVerified } from './codex-bridge-native-context.mjs';
 import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
-import {buildIngressPrompt,stripExternalBackgroundFields} from './codex-bridge-prompt.mjs';
+import {buildIngressPrompt} from './codex-bridge-prompt.mjs';
 import {BackgroundScheduler,verifyBackgroundCompletion} from './codex-bridge-background.mjs';
 import {prepareReadonlyInput,readonlyEligible,validateReadonlyConfig,verifiedReadonly} from './codex-bridge-readonly.mjs';
 import {DeferredPerformance} from './codex-bridge-performance.mjs';
 import {WakeSignal,EventFileWakeup} from './codex-bridge-wakeup.mjs';
+import {createOpsRuntime,stripExternalOpsFields} from './codex-bridge-ops-runtime.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -1126,7 +1127,7 @@ async function sendDurableText(binding, text, key) {
 
 
 async function durableBotLoops(binding) {
-  let reactions,inbox,nativeInteractions;
+  let reactions,inbox,nativeInteractions,ops;
   const intakeWake=new WakeSignal(),dispatchWake=new WakeSignal(),managed=new ManagedConnection();
   const eventWake=new EventFileWakeup(binding.logPath,intakeWake);
   const resources=[intakeWake,dispatchWake,managed,eventWake];
@@ -1178,6 +1179,9 @@ async function durableBotLoops(binding) {
     parallelPreparation:event=>readonlyEligible(binding,event),
     prepare: async event => {
       const job=inbox.jobs.get(event.message_id??event.id);
+      // Only a private, exact scoped receipt may opt into the native audit.
+      // Keep the original event immutable for its audit hash and visible marker.
+      if(ops?.controlProtocol(event))return event;
       if(event.background_completion===true) {
         if(!verifyBackgroundCompletion(binding,event,backgroundRoot))
           throw Object.assign(Error('background_completion_unverified'),{permanent:true});
@@ -1198,7 +1202,9 @@ async function durableBotLoops(binding) {
         && verifyBackgroundCompletion(binding,job.prepared,backgroundRoot);
       if(job.prepared.background_completion===true && !trustedBackgroundCompletion)
         throw Object.assign(Error('background_completion_unverified'),{permanent:true});
-      const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now,trustedBackgroundCompletion});
+      const trustedTaskControl=ops?.controlProtocol(job.prepared),route=ops?.routePlan(job.prepared);
+      const trustedTaskRoute=!trustedTaskControl && route?.lane==='background'?route:null;
+      const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now,trustedBackgroundCompletion,trustedTaskControl,trustedTaskRoute});
       job.readonlyPrefetchIncluded=!!verifiedReadonly(binding,job.prepared,now)?.result;
       inbox.save(job);
       if(target.pty?.transport==='managed_app_server') {
@@ -1220,7 +1226,8 @@ async function durableBotLoops(binding) {
     suppressNotices: job => binding.group_access==='all_group_humans' && suppressUnclassifiedNotice(job),
     classifiedFeedback: binding.group_access==='all_group_humans',
     initialFeedbackCard: binding.initial_feedback_card===true,
-    classification: job => classifyWithFastFeedback({root:path.join(DAEMON_DIR,'state','completions-v1'),inboxRoot:INBOX_ROOT,binding,job}),
+    classification: job => ops?.controlProtocol(job.event)?null:classifyWithFastFeedback({root:path.join(DAEMON_DIR,'state','completions-v1'),inboxRoot:INBOX_ROOT,binding,job}),
+    silentCompletion: job => ops?.confirmVisible(job)===true,
     onActionable: job => {reactions?.observe([job]);reactions?.flush().catch(()=>log('reaction_feedback_failed',{bot:binding.bot}));},
     progress: async (text,key,context) => {
       outbound.progress(text,key,getRoute({jobId:context?.jobId,
@@ -1233,6 +1240,11 @@ async function durableBotLoops(binding) {
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
   const background=new BackgroundScheduler({root:backgroundRoot,inboxRoot:INBOX_ROOT,binding,inbox,
     codexCliJs:config.runtime.codex_cli_js,codexHome:config.runtime.codex_home});
+  ops=createOpsRuntime({binding,codexHome:config.runtime.codex_home,stateDir:path.join(DAEMON_DIR,'state'),
+    inboxRoot:INBOX_ROOT,backgroundRoot,completionRoot:path.join(DAEMON_DIR,'state','completions-v1'),daemonDir:DAEMON_DIR,
+    router,outbound,request:contextRequest,getRoute,getJobs:()=>inbox.jobs.values(),
+    getBackgroundStats:()=>background.stats(),
+    resolveAppId:()=>resolveLarkAppId(LARK_ENTRY,binding,{cwd:DAEMON_DIR,children:activeChildren})});
   // Private pending jobs are tied to the originating mapping. Rebinding a bot
   // must not replay an old job or publish its answer into a different session.
   for(const job of inbox.jobs.values()) {
@@ -1266,9 +1278,14 @@ async function durableBotLoops(binding) {
         // The selected NDJSON source fixes authenticatedBot. Never trust a bot,
         // thread, prompt or recipient supplied in the callback value itself.
         const isNative=(event.event??event).action?.value?.bridge_native==='v1';
-        const accepted=isNative?nativeInteractions.acceptCallback(event):actions.acceptCallback(event,{binding,authenticatedBot:binding.bot});
+        const isControl=(event.event??event).action?.value?.task_control==='v1';
+        const accepted=isControl?await ops.acceptCallback(event,{authenticatedBot:binding.bot})
+          :isNative?nativeInteractions.acceptCallback(event):actions.acceptCallback(event,{binding,authenticatedBot:binding.bot});
         if(accepted.reason==='storage_unavailable') throw new Error('action_storage_unavailable');
-        if(accepted.accepted){if(!isNative)actionDrain=actions.drain({binding,inbox});}
+        if(accepted.accepted){
+          if(isControl)inbox.enqueue(accepted.auditEvent);
+          else if(!isNative)actionDrain=actions.drain({binding,inbox});
+        }
         else {
           log('card_action_rejected',{bot:binding.bot,reason:accepted.reason??'invalid'});
           const payload=event.event??event;
@@ -1280,7 +1297,12 @@ async function durableBotLoops(binding) {
       }
       if (event && record.lineBytes.length<=config.runtime.max_inbound_bytes && isAuthorizedEvent(binding,event) && isFreshEvent(event)) {
         const id=event.message_id??event.id;
-        if(!seenIds.includes(id)) inbox.enqueue({...stripExternalBackgroundFields(event),bridge_binding:bindingSnapshot(binding)});
+        if(!seenIds.includes(id)) {
+          const job=inbox.enqueue({...stripExternalOpsFields(event),bridge_binding:bindingSnapshot(binding)});
+          // Durable inbox first, then a private control receipt before advancing
+          // the source cursor. The model remains an independent audit consumer.
+          if(job.status!=='done')await ops.acceptHuman(job);
+        }
       }
       if(!writeOffset(binding,record.offset,record.nextOffset,record.originalBytes)) break;
       if(i===99)intakeWake.signal(); // Drain a burst without waiting for a new fs event.
@@ -1309,16 +1331,19 @@ async function durableBotLoops(binding) {
     }
     const stats=inbox.stats();
     const backgroundStats=background.stats();
+    const opsStats=ops.stats();
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count
-      +backgroundStats.background_queued_count+backgroundStats.background_running_count+backgroundStats.background_result_pending_count;
+      +backgroundStats.background_queued_count+backgroundStats.background_running_count+backgroundStats.background_result_pending_count
+      +opsStats.ops_control_pending_count+opsStats.ops_alert_pending_count+opsStats.ops_delivery_pending_count;
     const fileStats=files.stats();
     const actionStats=actions.stats();
     const nativeStats=nativeInteractions.actions.stats();
     const reactionStats=reactions?.stats()??{reaction_blocked_count:1,reaction_last_error:'state_unavailable'};
-    updateBotStatus(binding.bot,{...stats,...backgroundStats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
+    updateBotStatus(binding.bot,{...stats,...backgroundStats,...opsStats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
       voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
-      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked||backgroundStats.background_blocked_count?'degraded':busy?'processing':'idle',
+      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked||backgroundStats.background_blocked_count||backgroundStats.background_admission_blocked_count
+        ||opsStats.ops_policy_blocked_count||opsStats.ops_control_blocked_count||opsStats.ops_alert_blocked_count||opsStats.ops_delivery_blocked_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };
@@ -1330,6 +1355,8 @@ async function durableBotLoops(binding) {
     loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),
     loop('reactions',()=>reactions?.flush(),1000),
     loop('background',()=>background.tick(),1000),
+    loop('ops-controls',()=>ops.controlsTick(),500),loop('ops-monitor',()=>ops.monitorTick(),5000),
+    loop('ops-delivery',()=>ops.deliveryTick(),5000),
     loop('performance',()=>performance.observe(binding.bot,inbox.jobs.values()),1000)]);
   } finally {for(const resource of resources){resource.close();runtimeResources.delete(resource);}}
 }

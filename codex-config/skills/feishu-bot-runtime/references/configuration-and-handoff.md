@@ -116,4 +116,4 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 
 全群模式的故障通知仅在原消息marker与actionable均已确认后显示；静默、未分类和未入站故障保留诊断而不打扰群。共享final的答复送达与各原任务卡关闭分别持久化；晚扫描、重启及旧版漏关卡只补原卡关闭，不重复全文、报告、按钮或业务。独立请求可越过准备退避；同发送者、回复链和未知旧记录仍保序，原生上下文不可验证时保守FIFO。入站摘要不是鉴权秘密，越过队列须本地API查验记录。
 
-持久调度无需改变绑定配置；只响应主会话显式提交的后台任务，初始队列为空。使用与恢复见[background-tasks.md](background-tasks.md)。安装须同时包含store、CLI、runner及worker接线，并更新生效技能参考；增加后台队列计数到空闲门禁。只替换固定测试并发布版本的必要组件，保留配置文件字节、原managed writer、subscriber及事件源。源码回归、安装读回、独立子任务smoke和真实群完整闭环分别记录，不能互相替代。
+持久调度无需改变绑定配置；缺省只响应主会话显式提交的后台任务，初始队列为空。可经用户授权另存精确绑定的私有 `state/ops-v1/<bot>/policy.json` 启用窄范围自动研究分流、监测和后台任务控制；策略缺失不启用，不能复制真实 scope 到 Git。使用与恢复见[background-tasks.md](background-tasks.md)，新协议边界见[ops-experience.md](ops-experience.md)。安装须同时包含store、CLI、runner及worker接线，并更新生效技能参考；增加后台、admission、控制、告警和独立交付的全部 pending/blocked 计数到空闲门禁，缺字段不算零。只替换固定测试并发布版本的必要组件，保留原绑定配置文件字节、原managed writer、subscriber及事件源；私有策略须在等待和安装后核对 scope、权限与固定hash。源码回归、安装读回、独立子任务smoke和真实群完整闭环分别记录，不能互相替代。

@@ -9,7 +9,7 @@ import { atomicWriteJson } from './codex-bridge-storage.mjs';
 import { bindingSnapshot } from './codex-bridge-ux.mjs';
 import { enqueueActionable } from './codex-bridge-completion.mjs';
 import { BackgroundScheduler,verifyBackgroundCompletion,runBackgroundCli,parseBackgroundArguments } from './codex-bridge-background.mjs';
-import { backgroundBinding,enqueueBackgroundTask,cancelBackgroundTask,backgroundTaskStatus,readBackgroundTask,readBackgroundJson,publishBackgroundJson } from './codex-bridge-background-store.mjs';
+import { backgroundBudget,backgroundQueuedCount,stableJson,backgroundBinding,enqueueBackgroundTask,cancelBackgroundTask,backgroundTaskStatus,readBackgroundTask,readBackgroundJson,publishBackgroundJson } from './codex-bridge-background-store.mjs';
 
 function fixture(t,{launchThrow=false,maxConcurrent=2}={}) {
   const base=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'background-store-')));t.after(()=>fs.rmSync(base,{recursive:true,force:true}));
@@ -137,6 +137,38 @@ test('queued cancel never launches; running cancel uses exact nonce; already fin
   const result=cancelBackgroundTask({...f.options,taskKey:'finished'});assert.equal(result.alreadyFinished,true);assert.equal(result.cancelRequested,false);
   assert.equal(fs.existsSync(path.join(f.dir(c.taskId),'cancel.json')),false);
 });
+test('delivered unknown notification does not prevent exact-nonce cancellation or release the runner reservation',async t=>{
+  const f=fixture(t),a=f.enqueue();await f.scheduler.tick();const run=f.run(a.taskId);f.done(f.source);f.probe(false);await f.scheduler.tick();
+  f.done(callbacks(f)[0]);await f.scheduler.tick();assert.equal(f.schedule(a.taskId).notification.status,'notified');
+  const result=cancelBackgroundTask(f.options);assert.equal(result.cancelRequested,true);assert.equal(result.alreadyFinished,undefined);
+  const cancellation=readBackgroundJson(path.join(f.dir(a.taskId),'cancel.json'));assert.equal(cancellation.nonce,run.nonce);
+  f.advance(1000);cancelBackgroundTask(f.options);assert.deepEqual(readBackgroundJson(path.join(f.dir(a.taskId),'cancel.json')),cancellation);
+  f.open();await f.scheduler.tick();assert.equal(f.launches.length,1);assert.equal(f.scheduler.stats().background_running_count,1);
+  f.run(a.taskId,'cancelled',{errorCategory:'cancelled'});await f.scheduler.tick();assert.equal(f.scheduler.stats().background_running_count,0);
+  assert.equal(callbacks(f).length,2);assert.equal(JSON.parse(JSON.parse(callbacks(f)[1].event.content).text.split('\n').at(-1)).status,'cancelled');
+});
+test('only a latest terminal run with matching task hash and claim nonce can block cancellation',async t=>{
+  const f=fixture(t),a=f.enqueue();await f.scheduler.tick();const original=f.run(a.taskId,'completed'),file=path.join(f.dir(a.taskId),'run.json');
+  for(const patch of [{nonce:randomUUID()},{taskSha256:'0'.repeat(64)},{schema:2},{taskId:'f'.repeat(64)},{status:'indeterminate'}]) {
+    atomicWriteJson(file,{...original,...patch});const result=cancelBackgroundTask(f.options);
+    assert.equal(result.cancelRequested,true);assert.equal(result.alreadyFinished,undefined);
+    assert.equal(readBackgroundJson(path.join(f.dir(a.taskId),'cancel.json')).nonce,original.nonce);
+  }
+  atomicWriteJson(file,original);
+  const state=f.schedule(a.taskId);state.notification={status:'notified'};atomicWriteJson(path.join(f.dir(a.taskId),'schedule.json'),state);
+  const result=cancelBackgroundTask(f.options);assert.equal(result.alreadyFinished,true);assert.equal(result.status,'completed');assert.equal(result.cancelRequested,false);
+  assert.equal(f.launches.length,1);
+});
+test('missing or invalid claim nonce stays cancellation-unknown and cannot replay the runner',async t=>{
+  for(const mode of ['missing','invalid']) {
+    const f=fixture(t),a=f.enqueue();await f.scheduler.tick();f.run(a.taskId);
+    const file=path.join(f.dir(a.taskId),'claim.json');
+    if(mode==='missing')fs.unlinkSync(file);else atomicWriteJson(file,{schema:1,taskId:a.taskId,nonce:'unverified'});
+    const result=cancelBackgroundTask(f.options);assert.equal(result.cancelUnknown,true);assert.equal(result.cancelRequested,false);
+    assert.equal(fs.existsSync(path.join(f.dir(a.taskId),'cancel.json')),false);
+    f.open();await f.scheduler.tick();assert.equal(f.launches.length,1);assert.equal(f.scheduler.stats().background_running_count,1);
+  }
+});
 
 test('binding/runtime changes prevent callbacks but preserve live or unknown runner reservations',async t=>{
   const f=fixture(t),a=f.enqueue();await f.scheduler.tick();f.run(a.taskId);f.done(f.source);
@@ -257,4 +289,47 @@ test('valid runtime proxy fields take precedence and absent private transport ke
   await f.scheduler.tick();assert.equal(f.schedule(b.taskId).status,'claimed');
   assert.equal(f.launches[1].env.HTTP_PROXY,runtime.HTTP_PROXY);assert.equal(f.launches[1].env.NO_PROXY,runtime.NO_PROXY);
   assert.equal(f.launches[1].env.HTTPS_PROXY,'http://127.0.0.1:7890');assert.deepEqual(runtime,{HTTP_PROXY:'http://127.0.0.1:7000',NO_PROXY:'localhost',PATH:'/fixture/bin'});
+});
+
+
+test('queue admission has a hard cap, preserves identical retries at capacity, and releases only claimed slots',async t=>{
+  const f=fixture(t),a=f.enqueue({taskKey:'one',maxQueued:2}),b=f.enqueue({taskKey:'two',maxQueued:2});
+  assert.equal(backgroundQueuedCount(f.root,f.binding),2);assert.equal(f.enqueue({taskKey:'one',maxQueued:2}).duplicate,true);
+  assert.throws(()=>f.enqueue({taskKey:'three',maxQueued:2}),/queue_full/);assert.equal(fs.existsSync(path.join(f.root,f.binding.bot,'admission.json')),false);
+  await f.scheduler.tick();assert.equal(f.launches.length,2);assert.equal(backgroundQueuedCount(f.root,f.binding),0);
+  f.enqueue({taskKey:'three',maxQueued:2});assert.equal(backgroundQueuedCount(f.root,f.binding),1);
+  atomicWriteJson(path.join(f.root,f.binding.bot,'admission.json'),{schema:1,nonce:'crashed-private-admission',taskId:'unknown'});
+  assert.throws(()=>f.enqueue({taskKey:'four',maxQueued:2}),/queue_busy/);
+  assert.equal(f.enqueue({taskKey:'three',maxQueued:2}).duplicate,true);assert.equal(f.launches.length,2);
+  assert.equal(f.scheduler.stats().background_admission_blocked_count,1);
+});
+
+test('queued priority is stable and cannot preempt either claimed or unknown work',async t=>{
+  const f=fixture(t);const low=f.enqueue({taskKey:'low',priority:'low'}),normal=f.enqueue({taskKey:'normal'}),high=f.enqueue({taskKey:'high',priority:'high'});
+  await f.scheduler.tick();assert.deepEqual(f.launches.map(l=>l.task.id),[high.taskId,normal.taskId]);assert.equal(f.schedule(low.taskId),null);
+  const urgent=f.enqueue({taskKey:'urgent',priority:'high'});await f.scheduler.tick();assert.equal(f.launches.length,2);
+  f.run(high.taskId,'failed',{errorCategory:'child_failed'});f.run(normal.taskId);await f.scheduler.tick();assert.equal(f.launches[2].task.id,urgent.taskId);
+  f.probe(false);await f.scheduler.tick();assert.equal(f.launches.length,3);assert.equal(f.scheduler.stats().background_running_count,2);
+  assert.throws(()=>f.enqueue({taskKey:'urgent',priority:'low'}),/task_conflict/);
+});
+
+test('budget controls are bounded, deduplicated, and result readback rejects a violated per-task output limit',async t=>{
+  const f=fixture(t),budget={version:1,timeoutMs:60000,maxOutputBytes:1024,researchStepLimit:2};
+  for(const patch of [{maxOutputBytes:1023},{maxOutputBytes:262145},{researchStepLimit:0},{researchStepLimit:25},{timeoutMs:60001},{dollars:1},{version:2}])
+    assert.throws(()=>f.enqueue({timeoutMs:60000,budget:{...budget,...patch}}),/budget_invalid/);
+  assert.throws(()=>f.enqueue({priority:'urgent'}),/priority_invalid/);
+  const a=f.enqueue({timeoutMs:60000,budget});assert.equal(f.enqueue({timeoutMs:60000,budget}).duplicate,true);
+  assert.throws(()=>f.enqueue({timeoutMs:60000,budget:{...budget,researchStepLimit:3}}),/task_conflict/);
+  await f.scheduler.tick();f.run(a.taskId,'completed',{finalText:'x'.repeat(1025)});await f.scheduler.tick();
+  assert.equal(f.schedule(a.taskId).status,'failed');assert.equal(f.schedule(a.taskId).errorCategory,'result_invalid');
+});
+
+test('legacy schema-one tasks preserve old hash, idempotency, priority and output budget on read and execution',async t=>{
+  const f=fixture(t),a=f.enqueue(),file=path.join(f.dir(a.taskId),'task.json'),task=readBackgroundTask(f.root,f.binding,a.taskId);
+  delete task.priority;delete task.budget;
+  const keys=['bot','sourceJobId','taskKey','title','prompt','runAtInput','timeoutMs','binding','sourceFingerprint','inboxRoot','sourceEvent','codexCliJs','codexHome'];
+  task.requestHash=digest(stableJson(Object.fromEntries(keys.map(key=>[key,task[key]]))));atomicWriteJson(file,task);
+  assert.equal(backgroundBudget(readBackgroundTask(f.root,f.binding,a.taskId)).maxOutputBytes,262144);
+  assert.equal(f.enqueue().duplicate,true);assert.throws(()=>f.enqueue({priority:'high'}),/task_conflict/);
+  await f.scheduler.tick();assert.equal(f.launches.length,1);assert.equal(f.launches[0].task.priority,undefined);
 });
