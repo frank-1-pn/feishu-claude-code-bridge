@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { inspectManagedThread,submitManagedTurn } from './codex-managed-app-server.mjs';
+import { ManagedConnection,submitManagedTurn } from './codex-managed-app-server.mjs';
 import { isAuthorizedMessage } from './codex-bridge-authorization.mjs';
 
 /**
@@ -51,6 +51,7 @@ import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 import {buildIngressPrompt} from './codex-bridge-prompt.mjs';
 import {prepareReadonlyInput,readonlyEligible,validateReadonlyConfig,verifiedReadonly} from './codex-bridge-readonly.mjs';
 import {DeferredPerformance} from './codex-bridge-performance.mjs';
+import {WakeSignal,EventFileWakeup} from './codex-bridge-wakeup.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -1125,6 +1126,10 @@ async function sendDurableText(binding, text, key) {
 
 async function durableBotLoops(binding) {
   let reactions,inbox,nativeInteractions;
+  const intakeWake=new WakeSignal(),dispatchWake=new WakeSignal(),managed=new ManagedConnection();
+  const eventWake=new EventFileWakeup(binding.logPath,intakeWake);
+  const resources=[intakeWake,dispatchWake,managed,eventWake];
+  for(const resource of resources)runtimeResources.add(resource);
   try {
     reactions=new DurableReactions({root:path.join(DAEMON_DIR,'state','reactions-v1'),binding,
       request:createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:15000}),
@@ -1166,6 +1171,7 @@ async function durableBotLoops(binding) {
   }});
   const performance=new DeferredPerformance(path.join(DAEMON_DIR,'state','performance-v1'),{onError:category=>log(category,{bot:binding.bot})});
   inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
+    onQueued:()=>dispatchWake.signal(),
     parallelPreparation:event=>readonlyEligible(binding,event),
     prepare: async event => {
       const hydrated=await hydrateNativeContext(binding,event,contextRequest);
@@ -1175,7 +1181,8 @@ async function durableBotLoops(binding) {
     },
     target: async () => {
       const pty = await resolveActivePty(binding);
-      if(pty?.transport==='managed_app_server')await inspectManagedThread(pty,binding);
+      if(pty?.transport==='managed_app_server')await managed.inspect(pty,binding);
+      else managed.discard();
       return { pty, rollout: findRolloutPath(binding.codex_thread_id) };
     },
     inject: async (job,target) => {
@@ -1183,7 +1190,7 @@ async function durableBotLoops(binding) {
       job.readonlyPrefetchIncluded=!!verifiedReadonly(binding,job.prepared,now)?.result;
       inbox.save(job);
       if(target.pty?.transport==='managed_app_server') {
-        await submitManagedTurn(target.pty,binding,prompt);
+        await managed.submit(target.pty,binding,prompt);
       } else if (target.pty) {
         await runPtyTurn(binding,job.event,prompt,'',target.pty,null,true);
       } else {
@@ -1218,18 +1225,22 @@ async function durableBotLoops(binding) {
       delete job.notice;delete job.pendingProgress;inbox.save(job);
     }
   }
-  const loop = async (name,fn,delay=500) => {
+  const loop = async (name,fn,delay=500,wake) => {
     while (!stopping) {
-      try { await fn(); }
+      let work=false;
+      try { work=await fn(); }
       catch {
         lastError={at:new Date().toISOString(),bot:binding.bot,stage:name,error:'operation_failed'};
         log('inbox_loop_error',{bot:binding.bot,stage:name});
       }
-      await sleep(delay);
+      if(stopping)break;
+      if(name==='dispatch' && work)continue;
+      if(wake)await wake.wait(delay);else await sleep(delay);
     }
   };
   let actionDrain={blocked:0,pending:0};
   const intake = async () => {
+    eventWake.ensure();
     for(let i=0;i<100;i++) {
       const record=readNextLine(binding); if(!record) break;
       let event;
@@ -1256,6 +1267,7 @@ async function durableBotLoops(binding) {
         if(!seenIds.includes(id)) inbox.enqueue({...event,bridge_binding:bindingSnapshot(binding)});
       }
       if(!writeOffset(binding,record.offset,record.nextOffset,record.originalBytes)) break;
+      if(i===99)intakeWake.signal(); // Drain a burst without waiting for a new fs event.
     }
   };
   const receipts = async () => {
@@ -1292,7 +1304,7 @@ async function durableBotLoops(binding) {
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };
-  await Promise.all([loop('intake',intake),loop('dispatch',()=>inbox.dispatchOne()),
+  try { await Promise.all([loop('intake',intake,500,intakeWake),loop('dispatch',()=>inbox.dispatchOne(),500,dispatchWake),
     loop('actions',()=>{actionDrain=actions.drain({binding,inbox});}),
     loop('native-actions',()=>nativeInteractions.drain(),1000),loop('cloud-docs',()=>cloudDocs.flush(),1000),
     loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000),
@@ -1300,6 +1312,7 @@ async function durableBotLoops(binding) {
     loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),
     loop('reactions',()=>reactions?.flush(),1000),
     loop('performance',()=>performance.observe(binding.bot,inbox.jobs.values()),1000)]);
+  } finally {for(const resource of resources){resource.close();runtimeResources.delete(resource);}}
 }
 
 let args;
@@ -1319,12 +1332,14 @@ let progressIds = [];
 let lastSuccessAt = null;
 let lastError = null;
 const activeChildren = new Set();
+const runtimeResources = new Set();
 const receiptPromises = new Map();
 const botStates = {};
 const retryCounts = new Map();
 
 function cleanup() {
   stopping = true;
+  for(const resource of runtimeResources)resource.close();
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   for (const child of activeChildren) {
     if (!child.killed) child.kill();
@@ -1365,8 +1380,9 @@ try {
   seenIds = loadIdJournal(SEEN_PATH);
   receiptIds = loadIdJournal(RECEIPTS_PATH);
   progressIds = loadIdJournal(PROGRESS_PATH);
-  process.once('SIGINT', () => { stopping = true; });
-  process.once('SIGTERM', () => { stopping = true; });
+  const stop=()=>{stopping=true;for(const resource of runtimeResources)resource.close();};
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
   process.once('exit', cleanup);
   log('bridge_started', { pid: process.pid, instance, bots: Object.keys(config.bindings) });
   await mainLoop();

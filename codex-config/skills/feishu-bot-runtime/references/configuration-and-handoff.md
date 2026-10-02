@@ -106,3 +106,8 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 ### 只读预取配置边界
 
 仅经用户授权在目标bot增加`readonly_prefetch`，不覆盖整个绑定。助手接口是固定Python3.9+标准库只读agenda命令；部署前记录真实助手SHA256并在等待及安装后复核。助手、消息状态及预取内容留本机私有目录；源码提供机制，不提供可用真实绑定。开启不是API访问或真人速度验收：分别核对固定发布tree、安装模块/技能hash、本bot配置、原writer/subscriber、全队列/pong，最后以真实新消息核对预取采用和最终送达耗时。
+
+
+### Managed入站提速部署边界
+
+合并重复连接准备、复用原managed连接和监听既有事件文件只涉及运行模块，不要求改变模型/effort、权限、subscriber、writer、绑定或offset。配置与只读助手保持原hash；上线以固定测试并发布的ref/tree、准确模块和生效技能hash核对，经过原会话空闲及全队列/真实pong门禁。连接复用仍须最新会话和提交前身份核验，身份失效不重放未知修改。只能由唯一部署者替换worker并待原watchdog恢复；只读安装验收与真人提速分别记录。

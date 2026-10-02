@@ -73,6 +73,7 @@ export async function connectManagedWebSocket(socketPath,{timeoutMs=10000,maxByt
   await ready;
   const send=item=>{if(closed)throw fail('managed_socket_closed');const data=Buffer.from(JSON.stringify(item));if(data.length>1024*1024)throw fail('managed_request_oversize');socket.write(clientFrame(1,data));};
   return {
+    get closed(){return closed;},
     request(method,params){return new Promise((resolve,reject)=>{const id=nextId++;const timer=setTimeout(()=>{waiting.delete(id);reject(fail('managed_rpc_timeout'));stop(fail('managed_rpc_timeout'));},timeoutMs);waiting.set(id,{resolve,reject,timer});try{send({id,method,params});}catch(error){clearTimeout(timer);waiting.delete(id);reject(error);stop(error);}});},
     notify(method,params={}){send({method,params});},
     close(){stop(fail('managed_client_closed'));},

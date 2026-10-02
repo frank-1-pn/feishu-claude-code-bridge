@@ -63,7 +63,9 @@ export function resolveManagedDaemon(home,threadId,writers=activeCodexWriters(ho
   if(socket.mode&0o077)fail('managed_socket_mode_invalid');
   const endpoints=command('/usr/sbin/lsof',['-a','-p',String(record.pid),'-U','-Fn']).split('\n').filter(l=>l.startsWith('n')).map(l=>l.slice(1));
   if(!endpoints.includes(expected))fail('managed_socket_owner_mismatch');
-  return {transport:'managed_app_server',home:root,threadId,writer_pid:record.pid,socketPath:expected,socketDev:socket.dev,socketIno:socket.ino,record};
+  const lock=owned(path.join(root,'thread-writer-locks',threadId+'.lock'));
+  return {transport:'managed_app_server',home:root,threadId,writer_pid:record.pid,socketPath:expected,socketDev:socket.dev,socketIno:socket.ino,
+    writerLock:{dev:lock.dev,ino:lock.ino,ctimeMs:lock.ctimeMs},record};
 }
 export function verifyManagedDescriptor(target,binding,resolve=resolveManagedDaemon) {
   if(target.threadId!==binding.codex_thread_id)fail('managed_thread_scope_mismatch');
@@ -114,4 +116,67 @@ export async function submitManagedTurn(target,binding,text,options) {
     if(typeof id!=='string' || !id.trim() || request.method==='turn/steer' && id!==request.params.expectedTurnId)fail('managed_submission_unconfirmed');
     return {transport:'managed_app_server',method:request.method};
   },options);
+}
+
+// Reuse transport/protocol initialization only. No PID/age cache grants trust:
+// each operation verifies the complete live descriptor, reads the current
+// thread, and every mutation verifies again immediately before sending once.
+export class ManagedConnection {
+  constructor({connect=connectManagedWebSocket,verify=verifyManagedDescriptor}={}) {
+    this.connect=connect;this.verify=verify;this.tail=Promise.resolve();this.entry=null;this.stopped=false;
+  }
+  discard() {const entry=this.entry;this.entry=null;entry?.client.close();}
+  close() {this.stopped=true;this.discard();}
+  withThread(target,binding,action) {
+    const operation=this.tail.then(async()=>{
+      if(this.stopped)fail('managed_client_closed');
+      try {
+        this.verify(target,binding);
+        const scope={target,binding:{bot:binding.bot,threadId:binding.codex_thread_id,cwd:binding.cwd}};
+        if(this.entry && (!same(this.entry.scope,scope) || this.entry.client.closed))this.discard();
+        if(!this.entry) {
+          const client=await this.connect(target.socketPath);
+          // close() can race a pending connect; it must never leave a socket or
+          // permit queued work to initialize or mutate during shutdown.
+          if(this.stopped){client.close();fail('managed_client_closed');}
+          this.entry={scope:structuredClone(scope),client};
+          this.verify(target,binding);
+          await client.request('initialize',{clientInfo:{name:'feishu_codex_bridge',version:'1.0.0'}});
+          client.notify('initialized',{});
+        }
+        const client=this.entry.client;
+        // thread/read alone may return persisted history after unloading. Keep
+        // current loaded membership authoritative instead of caching it.
+        let cursor,loaded=false;const seen=new Set();
+        for(let i=0;i<100;i++) {
+          const page=await client.request('thread/loaded/list',{...(cursor?{cursor}:{})});
+          if(!Array.isArray(page?.data))fail('managed_loaded_list_invalid');
+          if(page.data.includes(binding.codex_thread_id)){loaded=true;break;}
+          if(!page.nextCursor)break;
+          if(typeof page.nextCursor!=='string' || seen.has(page.nextCursor))fail('managed_loaded_list_invalid');
+          seen.add(page.nextCursor);cursor=page.nextCursor;
+        }
+        if(!loaded)fail('managed_thread_not_loaded');
+        const result=await client.request('thread/read',{threadId:binding.codex_thread_id,includeTurns:true});
+        managedTurnRequest(binding,result?.thread,'');
+        if(this.stopped)fail('managed_client_closed');
+        return await action(client,result.thread,()=>{if(this.stopped)fail('managed_client_closed');this.verify(target,binding);});
+      } catch(error) {
+        // A subsequent independently checkpointed job may reconnect, but this
+        // operation never reconnects/retries an RPC (especially unknown ACKs).
+        this.discard();throw error;
+      }
+    });
+    this.tail=operation.catch(()=>{});return operation;
+  }
+  inspect(target,binding) {return this.withThread(target,binding,async(_client,thread)=>({status:thread.status.type}));}
+  submit(target,binding,text) {
+    return this.withThread(target,binding,async(client,thread,reverify)=>{
+      const request=managedTurnRequest(binding,thread,text);reverify();
+      const result=await client.request(request.method,request.params);
+      const id=request.method==='turn/steer'?result?.turnId:result?.turn?.id;
+      if(typeof id!=='string' || !id.trim() || request.method==='turn/steer' && id!==request.params.expectedTurnId)fail('managed_submission_unconfirmed');
+      return {transport:'managed_app_server',method:request.method};
+    });
+  }
 }

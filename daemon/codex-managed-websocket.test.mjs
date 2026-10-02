@@ -52,3 +52,12 @@ test('lost ACK, socket close and RPC error reject once and never retransmit',asy
   const c=await connectManagedWebSocket(f.socketPath,{timeoutMs:50});await assert.rejects(c.request('turn/start',{}),/managed_/);assert.equal(calls,1);c.close();
  }
 });
+test('persistent connection preserves response routing through interleaved notifications and server approval requests',async t=>{
+ let calls=0;const f=await fixture(t,(s,op,p)=>{if(op!==1)return;calls++;const q=JSON.parse(p);
+  s.write(Buffer.concat([frame(1,JSON.stringify({method:'thread/status/changed',params:{status:{type:'active'}}})),
+   frame(1,JSON.stringify({id:'server-approval',method:'item/commandExecution/requestApproval',params:{}})),
+   frame(1,JSON.stringify({id:q.id,result:{call:calls}}))]));});
+ const c=await connectManagedWebSocket(f.socketPath);assert.equal(c.closed,false);
+ for(let i=1;i<=3;i++)assert.equal((await c.request('thread/read',{})).call,i);
+ assert.equal(calls,3);c.close();assert.equal(c.closed,true);
+});

@@ -83,7 +83,9 @@ export class DurableInbox {
     if (this.jobs.has(id)) return this.jobs.get(id);
     const job = { id, event, status: 'queued', acceptedAt: this.now(), attempts: 0,
       sequence: Math.max(0,...[...this.jobs.values()].map(j=>j.sequence??0))+1 };
-    this.save(job); this.jobs.set(id, job); return job;
+    this.save(job); this.jobs.set(id, job);
+    this.io.onQueued?.(); // Wake only after the private durable accept succeeds.
+    return job;
   }
   async dispatchOne() {
     if (this.dispatching) return false;
