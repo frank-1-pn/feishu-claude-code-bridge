@@ -27,8 +27,8 @@ export function reactionForJob(job,now=Date.now(),maxAgeMs=86400000) {
 // Intents and reaction IDs survive crashes; uncertain creates are reconciled
 // against this exact app before retrying. Other users/apps are never removed.
 export class DurableReactions {
-  constructor({root,binding,request,resolveAppId,now=Date.now,maxAgeMs=86400000,enabled=binding.reaction_feedback!==false}) {
-    Object.assign(this,{binding,request,resolveAppId,now,maxAgeMs,enabled});
+  constructor({root,binding,request,resolveAppId,onTypingApplied,now=Date.now,maxAgeMs=86400000,enabled=binding.reaction_feedback!==false}) {
+    Object.assign(this,{binding,request,resolveAppId,onTypingApplied,now,maxAgeMs,enabled});
     this.dir=path.join(root,binding.bot);fs.mkdirSync(this.dir,{recursive:true});
     this.scope=digest(JSON.stringify(bindingSnapshot(binding)));
     this.metaFile=path.join(this.dir,`meta-${this.scope}.json`);
@@ -46,6 +46,8 @@ export class DurableReactions {
     for(const job of jobs) {
       if(!isBoundJob(this.binding,job) || job.event?.synthetic_callback || !/^om_[A-Za-z0-9_-]+$/.test(job.id??''))continue;
       let row=this.rows.get(job.id);
+      if(row?.firstTypingAppliedAt!==undefined)this.onTypingApplied?.(job.id,row.firstTypingAppliedAt,'create_response');
+      else if(row?.firstTypingVerifiedAt!==undefined)this.onTypingApplied?.(job.id,row.firstTypingVerifiedAt,'reconciled_observation');
       const classified=this.binding.group_access==='all_group_humans';
       const allowed=!classified || job.markerSeen && job.feedbackDisposition==='actionable' && job.completionDisposition!=='silent';
       if(!row && !allowed)continue;
@@ -77,7 +79,7 @@ export class DurableReactions {
       const data=await this.api('list',row.messageId,{emoji,pageToken});
       const found=(data.items??[]).find(item=>item.operator?.operator_type==='app' && item.operator.operator_id===this.appId
         && item.reaction_type?.emoji_type===emoji && validId(item.reaction_id));
-      if(found){row.current={emoji,reactionId:found.reaction_id};row.pending=null;this.save(row);return;}
+      if(found){row.current={emoji,reactionId:found.reaction_id};row.pending=null;if(emoji==='Typing')row.firstTypingVerifiedAt??=this.now();this.save(row);if(emoji==='Typing')this.onTypingApplied?.(row.messageId,row.firstTypingVerifiedAt,'reconciled_observation');return;}
       if(!data.has_more){row.pending=null;this.save(row);return;}
       if(typeof data.page_token!=='string' || !data.page_token || seen.has(data.page_token))throw Object.assign(Error('reaction_pagination_invalid'),{code:'INVALID_PAGINATION'});
       pageToken=data.page_token;seen.add(pageToken);
@@ -101,7 +103,10 @@ export class DurableReactions {
       const data=await this.api('create',row.messageId,{emoji});
       if(!validId(data.reaction_id) || data.operator?.operator_type!=='app' || data.operator.operator_id!==this.appId)
         throw Object.assign(Error('reaction_response_invalid'),{code:'INVALID_REACTION_RESPONSE'});
-      row.current={emoji,reactionId:data.reaction_id};row.pending=null;row.lastAppliedAt=this.now();delete row.retry;this.save(row);
+      row.current={emoji,reactionId:data.reaction_id};row.pending=null;row.lastAppliedAt=this.now();delete row.retry;
+      if(emoji==='Typing'){row.firstTypingAppliedAt??=row.lastAppliedAt;row.firstTypingTimingSource='create_response';}
+      this.save(row);
+      if(emoji==='Typing')this.onTypingApplied?.(row.messageId,row.firstTypingAppliedAt,'create_response');
     }
   }
   fail(row,error) {

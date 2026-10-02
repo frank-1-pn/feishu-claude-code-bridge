@@ -24,7 +24,13 @@
 node "<运行目录>/codex-bridge-feedback.mjs" --bot <本轮bot> --job-id <本轮原message_id> --state actionable
 ```
 
+首次工具调用仅执行分类反馈，返回后立即输出带原消息标签的简短commentary，再读取技能、台账或查询业务；不把分类与耗时读取合并到同一次工具编排。
+
 工具只持久保存请求，返回 queued 不等于生效。worker 在确认该 job 的原消息 rollout marker 后写入 `feedbackDisposition=actionable`。`reaction_feedback=true` 时仅此 job 可显示 Typing、等待/失败及答复真实送达后的 DONE，入队不加 OnIt，不补标历史已完成任务。进度 commentary 必须以 `[飞书进度｜原message_id]` 开头；标签会被移除，正文通过独立任务进度卡回到该条原消息/话题。同 turn 两个任务使用独立 streamKey；未标记及 silent 消息不进入 progress route 或 final peers。无标签普通 commentary 只在 session 可见。最终回包收尾本轮各任务进度卡，完整结果只发送一次。
+
+可选 `initial_feedback_card=true` 时，worker 在原消息marker与actionable均核实后排入“正在处理”首卡，沿用该任务streamKey，后续公开commentary及最终结果更新同卡；不等待模型生成首条进度，不为已完成历史任务补发。排入首卡不表示平台送达。可选 `fast_actionable_classification=true` 仅对少量明确运营动作采用保守规则，经同样不可变分类通道和marker校验；不执行业务、不丢弃消息，未知、引用、否定及无上下文短答仍由运营session判断。
+
+首次表情与首卡延迟应读取平台操作成功返回后持久记录的 `firstTypingAppliedAt`（`firstTypingTimingSource=create_response`）和 `firstCardSentAt`（`firstCardTimingSource=send_response`）；这些是平台成功响应确认时间，不是手机已读时间。不确定创建后对账只记 `firstTypingVerifiedAt`，不能冒充实际创建时间；intent创建时间、分类受理时间与最后更新不能冒充首次送达时间。卡片发送失败、表情授权失败与模型尚未分类分别诊断。
 
 silent 和 actionable 共用 `completions-v1` 下唯一不可变 disposition，原子硬链接发布防止并发两工具都成功；重复同分类幂等，不同分类拒绝。旧 silent 请求兼容读取。无需回复时使用本轮注入提供的专用工具路径：
 

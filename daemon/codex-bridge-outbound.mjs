@@ -55,6 +55,10 @@ export class DurableOutbound {
     const file = this.file('card', key);
     const s = this.read(file, { key, revision: 0, ...(route?{route}:{}) });
     if (s.final) return;
+    // Replayed initial intents cannot regress a newer snapshot after a crash.
+    if(metadata.initialFeedback && s.revision>0)return;
+    if(metadata.jobId)s.jobId??=metadata.jobId;
+    if(metadata.initialFeedback)s.initialFeedback=true;
     const positioned=Number.isSafeInteger(metadata.position) && metadata.position>=0;
     if(positioned && metadata.position<=(s.progressPosition??-1))return;
     const clean = sanitizeFeishuReply(text).trim();
@@ -115,13 +119,13 @@ export class DurableOutbound {
     const card = s.presentation ? streamCard(s.text, final, s.presentation) : makeCard(s.text, final);
     // Bind an existing card before exposing actionable controls. On the first
     // raw-card send, create a non-actionable shell and only then patch controls.
-    if (s.messageId) await this.onCardMessage?.(s.messageId,s.presentation);
+    if (s.messageId) await this.onCardMessage?.(s.messageId,s.presentation,s);
     if (s.messageId) {
       await this.request(this.binding, ['api', 'PATCH', `/open-apis/im/v1/messages/${s.messageId}`,
         '--data', JSON.stringify({ content: JSON.stringify(card) })]);
     } else {
       const shellRequired=Boolean(s.route && this.sendMessage || s.presentation?.actionContext || s.presentation?.nativeContext);
-      const content=JSON.stringify(shellRequired ? streamCard('正在准备结果…',false) : card);
+      const content=JSON.stringify(shellRequired ? streamCard(s.initialFeedback?'正在处理…':'正在准备结果…',false) : card);
       const result = s.route && this.sendMessage
         ? await this.sendMessage({key:`card:${s.key}`,route:s.route,msgType:'interactive',content})
         : await this.request(this.binding, ['api', 'POST', '/open-apis/im/v1/messages',
@@ -130,8 +134,8 @@ export class DurableOutbound {
       if (!/^om_[A-Za-z0-9_-]+$/.test(result?.message_id ?? '')) throw new Error('card_message_id_missing');
       s.messageId = result.message_id;
       // Persist before exposing controls, including across an uncertain patch.
-      const created=this.read(file,s);created.messageId=s.messageId;atomicWriteJson(file,created);
-      await this.onCardMessage?.(s.messageId,s.presentation);
+      const created=this.read(file,s);created.messageId=s.messageId;created.firstCardSentAt??=this.now();created.firstCardTimingSource??='send_response';atomicWriteJson(file,created);
+      await this.onCardMessage?.(s.messageId,s.presentation,created);
       if(shellRequired) await this.request(this.binding,['api','PATCH',`/open-apis/im/v1/messages/${s.messageId}`,
         '--data',JSON.stringify({content:JSON.stringify(card)})]);
     }

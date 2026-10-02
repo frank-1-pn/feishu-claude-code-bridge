@@ -56,6 +56,27 @@ export class DurableInbox {
     this.jobs = new Map([...this.jobs].sort((a,b) => (a[1].sequence ?? a[1].acceptedAt)-(b[1].sequence ?? b[1].acceptedAt)));
   }
   save(j) { atomicJson(path.join(this.dir, `job-${digest(j.id)}.json`), j); }
+  recordFeedbackTiming(id, field, at, source) {
+    const job=this.jobs.get(id);
+    if(!job || !['firstTypingAppliedAt','firstTypingVerifiedAt','firstCardSentAt'].includes(field) || job[field]!==undefined || !Number.isFinite(at))return;
+    const sourceField=field==='firstCardSentAt'?'firstCardTimingSource':field==='firstTypingAppliedAt'?'firstTypingTimingSource':'firstTypingVerifiedTimingSource';
+    const candidate={...job,[field]:at,...(source?{[sourceField]:source}:{})};this.save(candidate);Object.assign(job,candidate);
+  }
+  progressKey(j) {
+    // Once published, the key belongs to this exact message for its lifetime.
+    // A later turn_context must not detach the final from its initial card.
+    if(this.io.classifiedFeedback && this.io.initialFeedbackCard && j.streamKey)return j.streamKey;
+    return digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}${this.io.classifiedFeedback?'\0'+j.id:''}`);
+  }
+  queueInitialFeedback(j) {
+    if(!this.io.initialFeedbackCard || !this.io.classifiedFeedback || !j.markerSeen || j.feedbackDisposition!=='actionable'
+        || j.event?.synthetic_callback || j.initialFeedbackQueuedAt!==undefined || !['submitted','delivered'].includes(j.status) || j.unclassifiedTurnEnded)return;
+    j.streamKey=this.progressKey(j);
+    const progress={text:'正在处理…',key:j.streamKey,at:null,observedAt:this.now(),initialFeedback:true};
+    const prior=j.pendingProgress?.events??(j.pendingProgress?[j.pendingProgress]:[]);
+    const candidate={...j,initialFeedbackQueuedAt:this.now(),pendingProgress:{...progress,events:[progress,...prior]}};
+    this.save(candidate);Object.assign(j,candidate);
+  }
   enqueue(event) {
     const id = event.message_id ?? event.id;
     if (typeof id !== 'string' || !/^om_[A-Za-z0-9_-]+$/.test(id)) throw new Error('invalid_message_id');
@@ -109,7 +130,9 @@ export class DurableInbox {
     const disposition=this.io.classification?.(j);
     if(disposition==='actionable' && j.feedbackDisposition!=='actionable') {
       const candidate={...j,feedbackDisposition:'actionable',feedbackAcceptedAt:this.now()};this.save(candidate);Object.assign(j,candidate);
+      this.io.onActionable?.(j);
     }
+    this.queueInitialFeedback(j);
     if(disposition!=='silent' && !this.io.silentCompletion?.(j))return false;
     const candidate={...j,status:'done',completedAt:this.now(),completionDisposition:'silent',feedbackDisposition:'silent'};
     for(const key of ['reply','replyKey','replyRetry','notice','noticeRetry','pendingProgress','timeoutNotice','timeoutNotified','timeoutNotifiedAt','receiptRetry','error'])delete candidate[key];
@@ -166,7 +189,7 @@ export class DurableInbox {
           if(j.feedbackDisposition!=='actionable' || tagged?.[1]!==j.id)continue;
           text=tagged[2];
         }
-        j.streamKey = digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}${this.io.classifiedFeedback?'\0'+j.id:''}`);
+        j.streamKey = this.progressKey(j);
         const progress={text,key:j.streamKey,at,observedAt,position:absoluteEnd};
         const prior=j.pendingProgress?.events??(j.pendingProgress?[j.pendingProgress]:[]);
         j.pendingProgress={...progress,events:[...prior,progress].slice(-12)};
@@ -210,7 +233,7 @@ export class DurableInbox {
       if (!j.pendingProgress) continue;
       try {
         for(const progress of j.pendingProgress.events??[j.pendingProgress])
-          await this.io.progress?.(progress.text,progress.key,{jobId:j.id,job:j,at:progress.at,observedAt:progress.observedAt,position:progress.position});
+          await this.io.progress?.(progress.text,progress.key,{jobId:j.id,job:j,at:progress.at,observedAt:progress.observedAt,position:progress.position,initialFeedback:progress.initialFeedback});
         delete j.pendingProgress; this.save(j);
       } catch { /* Saved snapshot is retried after restart. */ }
     }

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { inspectManagedThread,submitManagedTurn } from './codex-managed-app-server.mjs';
-import { readDisposition } from './codex-bridge-completion.mjs';
 import { isAuthorizedMessage } from './codex-bridge-authorization.mjs';
 
 /**
@@ -39,6 +38,7 @@ import { prepareInbound } from './codex-bridge-media.mjs';
 import { atomicWriteJson, atomicWriteText, createStatusPublisher } from './codex-bridge-storage.mjs';
 import { createLarkTransport, resolveLarkAppId } from './codex-bridge-lark.mjs';
 import { DurableReactions } from './codex-bridge-reactions.mjs';
+import { classifyWithFastFeedback } from './codex-bridge-fast-feedback.mjs';
 import { DurableOutbound } from './codex-bridge-outbound.mjs';
 import { FileOutbox } from './codex-bridge-files.mjs';
 import { ActionStore } from './codex-bridge-actions.mjs';
@@ -145,6 +145,10 @@ function loadAndValidateConfig(bindingsPath) {
       throw new Error(`${bot}: invalid allowed_sender_id`);
     }
     if (binding.group_access !== undefined && (!['all_members_mentions','all_group_humans'].includes(binding.group_access) || !/^ou_[A-Za-z0-9]+$/.test(binding.bot_open_id ?? ''))) throw new Error(`${bot}: invalid group access policy`);
+    for(const field of ['initial_feedback_card','fast_actionable_classification']) {
+      if(binding[field]!==undefined && typeof binding[field]!=='boolean')throw new Error(`${bot}: ${field} must be a boolean`);
+      if(binding[field]===true && binding.group_access!=='all_group_humans')throw new Error(`${bot}: ${field} requires all_group_humans`);
+    }
     if (typeof binding.profile !== 'string') throw new Error(`${bot}: profile must be a string`);
     if (profiles.has(binding.profile)) throw new Error(`${bot}: one runtime binding per Lark profile is required`);
     profiles.add(binding.profile);
@@ -343,7 +347,7 @@ function buildPrompt(binding, event) {
     : JSON.stringify(event.content ?? '');
   const prefix = `[飞书消息｜${binding.bot}｜${event.message_id ?? event.id ?? 'unknown'}] `
     + `来源：sender_id=${event.sender_id ?? 'unknown'}；原消息时间=${event.create_time ?? event.timestamp ?? '未记录'}；回复=${event.parent_id ?? event.root_id ?? '无'}。`
-    + (binding.group_access === 'all_group_humans' ? `已通过绑定运营群人类成员校验。所有消息需在本会话可见；先判断是否需要行动或回复。无需回复时调用 node "${path.join(DAEMON_DIR,'codex-bridge-complete.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --disposition silent；这是结构化静默完成，成功后结束本轮，不发占位答复。本轮默认不发commentary或表情。运营事务须先调用 node \"${path.join(DAEMON_DIR,'codex-bridge-feedback.mjs')}\" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --state actionable；工具入队不等于生效，worker验证本消息marker后才启用该任务反馈。随后commentary必须以[飞书进度｜${event.message_id ?? event.id}]开头，才能按本消息回传进度卡。与silent互斥，不为闲聊标actionable。` : '')
+    + (binding.group_access === 'all_group_humans' ? `已通过绑定运营群人类成员校验。所有消息需在本会话可见；先判断是否需要行动或回复。无需回复时调用 node "${path.join(DAEMON_DIR,'codex-bridge-complete.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --disposition silent；这是结构化静默完成，成功后结束本轮，不发占位答复。本轮默认不发commentary或表情。运营事务须先调用 node \"${path.join(DAEMON_DIR,'codex-bridge-feedback.mjs')}\" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --state actionable；工具入队不等于生效，worker验证本消息marker后才启用该任务反馈。随后commentary必须以[飞书进度｜${event.message_id ?? event.id}]开头，才能按本消息回传进度卡。首次feedback必须单独调用，调用后立即给一条有意义的带标签commentary，再读取技能、台账或执行业务；不要把feedback与多项耗时读取合在一次工具调用里。与silent互斥，不为闲聊标actionable。` : '')
     + (binding.group_access === 'all_group_humans' ? '请在当前线程处理，需要回复的事务先标actionable再以 final 交付结果；无需回复的消息逐条用完成工具处理。' : '已通过用户白名单。请在当前线程直接处理；阶段性工作进度可用 commentary 输出，bridge 会同步飞书，')
     + '同一 message_id 的重复投递只视作同一请求，不重复执行已完成的操作。'
     + '不要输出隐藏思考过程；最终答复只包含最终结果并由 bridge 回传。'
@@ -1131,15 +1135,15 @@ async function sendDurableText(binding, text, key) {
 
 
 async function durableBotLoops(binding) {
-  let reactions;
+  let reactions,inbox,nativeInteractions;
   try {
     reactions=new DurableReactions({root:path.join(DAEMON_DIR,'state','reactions-v1'),binding,
       request:createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:15000}),
-      resolveAppId:()=>resolveLarkAppId(LARK_ENTRY,binding,{cwd:DAEMON_DIR,children:activeChildren})});
+      resolveAppId:()=>resolveLarkAppId(LARK_ENTRY,binding,{cwd:DAEMON_DIR,children:activeChildren}),
+      onTypingApplied:(id,at,source)=>inbox?.recordFeedbackTiming(id,source==='reconciled_observation'?'firstTypingVerifiedAt':'firstTypingAppliedAt',at,source)});
   } catch {log('reaction_state_unavailable',{bot:binding.bot});}
   const actions=new ActionStore({root:path.join(DAEMON_DIR,'state','actions-v1'),bot:binding.bot});
   const contextRequest=createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:15000});
-  let inbox,nativeInteractions;
   const getRoute=(context={})=>{
     const allJobs=[...(inbox?.jobs.values()??[])];
     const jobId=typeof context==='string'?context:context.jobId;
@@ -1149,7 +1153,8 @@ async function durableBotLoops(binding) {
   const router=new DurableReplyRouter({root:path.join(DAEMON_DIR,'state','native-replies-v1'),binding,request:lark});
   const outbound = new DurableOutbound(path.join(DAEMON_DIR, 'state', 'outbound-v3'), binding, lark, {
     presentationEnabled:true,minIntervalMs:2000,sendMessage:args=>router.send(args),
-    onCardMessage:(messageId,presentation)=>{
+    onCardMessage:(messageId,presentation,state)=>{
+      if(state?.jobId && state.firstCardSentAt!==undefined)inbox?.recordFeedbackTiming(state.jobId,'firstCardSentAt',state.firstCardSentAt,state.firstCardTimingSource);
       if(presentation?.actionContext)actions.bindMessage(presentation.actionContext,messageId);
       if(presentation?.nativeContext)nativeInteractions.bindMessage(presentation.nativeContext,messageId);
     },
@@ -1199,9 +1204,16 @@ async function durableBotLoops(binding) {
     final,
     suppressNotices: () => binding.group_access==='all_group_humans',
     classifiedFeedback: binding.group_access==='all_group_humans',
-    classification: job => readDisposition({root:path.join(DAEMON_DIR,'state','completions-v1'),binding,job}),
-    progress: (text,key,context) => outbound.progress(text,key,getRoute({jobId:context?.jobId,
-      jobs:[...inbox.jobs.values()].filter(job=>job.streamKey===key && (binding.group_access!=='all_group_humans' || job.event?.synthetic_callback || job.markerSeen && job.feedbackDisposition==='actionable'))}),context),
+    initialFeedbackCard: binding.initial_feedback_card===true,
+    classification: job => classifyWithFastFeedback({root:path.join(DAEMON_DIR,'state','completions-v1'),inboxRoot:INBOX_ROOT,binding,job}),
+    onActionable: job => {reactions?.observe([job]);reactions?.flush().catch(()=>log('reaction_feedback_failed',{bot:binding.bot}));},
+    progress: async (text,key,context) => {
+      outbound.progress(text,key,getRoute({jobId:context?.jobId,
+        jobs:[...inbox.jobs.values()].filter(job=>job.streamKey===key && (binding.group_access!=='all_group_humans' || job.event?.synthetic_callback || job.markerSeen && job.feedbackDisposition==='actionable'))}),context);
+      // The durable card intent is already committed. Wake the serialized
+      // output lane without holding rollout intake behind network latency.
+      if(context?.initialFeedback)outbound.flushCards().catch(()=>log('initial_feedback_failed',{bot:binding.bot}));
+    },
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
   // Private pending jobs are tied to the originating mapping. Rebinding a bot
@@ -1268,6 +1280,11 @@ async function durableBotLoops(binding) {
   };
   const watch = async () => {
     await inbox.watch();
+    // Recover a successful send whose inbox timing checkpoint was interrupted.
+    for(const job of inbox.jobs.values())if(job.streamKey && job.firstCardSentAt===undefined){
+      const card=outbound.read(outbound.file('card',job.streamKey),{});
+      if(card.firstCardSentAt!==undefined)inbox.recordFeedbackTiming(job.id,'firstCardSentAt',card.firstCardSentAt,card.firstCardTimingSource);
+    }
     const stats=inbox.stats();
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count;
     const fileStats=files.stats();

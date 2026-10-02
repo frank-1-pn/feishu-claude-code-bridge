@@ -83,7 +83,7 @@ export async function updateStreamCard({file,s,final,binding,request,now,onMessa
   if(!current.cardId){
     // Entity creation has no UUID in the official schema. A crash here may
     // leave an unsent entity, but must never create two visible messages.
-    const initialCard=streamCard('',false,s.presentation);
+    const initialCard=streamCard(s.initialFeedback?'正在处理…':'',false,s.presentation);
     const result=await request(binding,['api','POST','/open-apis/cardkit/v1/cards','--data',JSON.stringify({type:'card_json',data:JSON.stringify(initialCard)})]);
     if(!/^[A-Za-z0-9_-]+$/.test(result?.card_id??''))throw Error('card_entity_id_missing');
     current=merge({cardId:result.card_id,cardSequence:0,lastAppliedCard:initialCard});
@@ -95,11 +95,11 @@ export async function updateStreamCard({file,s,final,binding,request,now,onMessa
       : await request(binding,['api','POST','/open-apis/im/v1/messages','--params',JSON.stringify({receive_id_type:'chat_id'}),
       '--data',JSON.stringify({receive_id:binding.chat_id,msg_type:'interactive',content:JSON.stringify({type:'card',data:{card_id:current.cardId}}),uuid:digest(`card:${s.key}`).slice(0,32)})]);
     if(!/^om_[A-Za-z0-9_-]+$/.test(result?.message_id??''))throw Error('card_message_id_missing');
-    current=merge({messageId:result.message_id});
+    current=merge({messageId:result.message_id,firstCardSentAt:now(),firstCardTimingSource:'send_response'});
   }
   // Persist the actual message binding before publishing clickable controls.
   // The hook is idempotent and also runs when resuming an already-sent card.
-  await onMessage?.(current.messageId,current.presentation??s.presentation);
+  await onMessage?.(current.messageId,current.presentation??s.presentation,current);
   // Finish an uncertain operation with its original sequence+uuid before
   // advancing. This also drains an older queued progress snapshot before final.
   const apply=async operation=>{

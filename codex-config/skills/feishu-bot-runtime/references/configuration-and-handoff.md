@@ -68,6 +68,8 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 | `native_reply_mode` | 默认 `quote`；另可选 `thread`、`off`。话题不会自动创建独立 Codex 会话 |
 | `cardkit_enabled` | 缺省启用；公开进度快照至少间隔 2 秒，非逐 token 输出；已关闭流式卡片自动转同卡整卡更新 |
 | `reaction_feedback` | 缺省启用；`all_group_humans` 未分类消息无表情，只有已确认 actionable 且 marker 可见的任务有 Typing/DONE；启用需 `reaction_feedback=true`；原消息表情表示已接收、处理中、答复送达，不等于任务业务验收 |
+| `initial_feedback_card` | 缺省关闭；全群策略原消息marker及actionable均核实后，由runtime排入首卡并沿用同一任务卡片，不等待首条模型进度；不对历史完成任务补发 |
+| `fast_actionable_classification` | 缺省关闭；仅识别窄范围明确运营动作，沿用不可变分类机制及marker门禁；全部合法消息仍进入原thread，未知交给session，禁止据此执行业务 |
 | `voice_enabled` | 只有显式 `true` 才启用；当前用户选择保留入口但不开通 ASR，保持 `false` |
 | `cloud_docs.enabled` | 缺省启用报告云文档能力；设 `false` 关闭。权限或创建失败需按交付状态反馈 |
 | `document_organization` | 模板显式设 `version:1, enabled:true, bare_file_action:"organize"`。Bot1 默认 `vault`，coding 默认 `project`；单次明确去向优先 |
