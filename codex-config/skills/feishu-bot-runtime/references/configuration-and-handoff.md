@@ -70,6 +70,7 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 | `reaction_feedback` | 缺省启用；`all_group_humans` 未分类消息无表情，只有已确认 actionable 且 marker 可见的任务有 Typing/DONE；启用需 `reaction_feedback=true`；原消息表情表示已接收、处理中、答复送达，不等于任务业务验收 |
 | `initial_feedback_card` | 缺省关闭；全群策略原消息marker及actionable均核实后，由runtime排入首卡并沿用同一任务卡片，不等待首条模型进度；不对历史完成任务补发 |
 | `fast_actionable_classification` | 缺省关闭；仅识别窄范围明确运营动作，沿用不可变分类机制及marker门禁；全部合法消息仍进入原thread，未知交给session，禁止据此执行业务 |
+| `readonly_prefetch` | 缺省关闭；version:1、enabled:true、helper_path为cwd内绝对regular文件、helper_sha256固定64位小写hex、timezone固定Australia/Brisbane、timeout_ms默认5000（500–10000）、max_age_ms默认30000（1000–60000）。只读单日应用primary查询，不扩大资源身份；失败回原session。路径、helper内容及配置改变后须核对固定hash |
 | `voice_enabled` | 只有显式 `true` 才启用；当前用户选择保留入口但不开通 ASR，保持 `false` |
 | `cloud_docs.enabled` | 缺省启用报告云文档能力；设 `false` 关闭。权限或创建失败需按交付状态反馈 |
 | `document_organization` | 模板显式设 `version:1, enabled:true, bare_file_action:"organize"`。Bot1 默认 `vault`，coding 默认 `project`；单次明确去向优先 |
@@ -101,3 +102,7 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 ## 可直接交给另一 session 的说明
 
 > 请从 `feat/feishu-ux-20260927` 的 `AGENTS.md`、`feishu-bot-runtime` skill 与本指南接手。先区分代码 checkout、已安装文件和常驻进程版本。当前 bot/thread/profile 从本机私有配置读取，复用已有 daemon，不另开订阅；仅维护文档不改绑、不重启。需要配置时先确认目标 thread、备份和校验，等 coding 及各投递队列完成再由唯一部署者重载。保留 Bot1 知识库、coding 项目附件、ASR 关闭的当前选择；配置、密钥、私有消息和原始附件不上传 Git。完成报告区分已提交、已推送、已安装与真实收发验收。
+
+### 只读预取配置边界
+
+仅经用户授权在目标bot增加`readonly_prefetch`，不覆盖整个绑定。助手接口是固定Python3.9+标准库只读agenda命令；部署前记录真实助手SHA256并在等待及安装后复核。助手、消息状态及预取内容留本机私有目录；源码提供机制，不提供可用真实绑定。开启不是API访问或真人速度验收：分别核对固定发布tree、安装模块/技能hash、本bot配置、原writer/subscriber、全队列/pong，最后以真实新消息核对预取采用和最终送达耗时。

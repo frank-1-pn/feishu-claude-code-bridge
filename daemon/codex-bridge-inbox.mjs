@@ -92,7 +92,17 @@ export class DurableInbox {
     this.dispatching = true;
     try {
       // Preserve image/text context order while transient preparation retries.
-      j.prepared ??= await this.io.prepare(j.event);
+      let targetResult;
+      if(this.io.parallelPreparation?.(j.event)) {
+        // Opt in only for unambiguous text reads. Both operations are reads;
+        // native callbacks/handled/waiting-input preserve their old sequence.
+        const results=await Promise.allSettled([
+          Promise.resolve().then(async()=>{j.prepared??=await this.io.prepare(j.event);return j.prepared;}),
+          Promise.resolve().then(()=>this.io.target()),
+        ]);
+        if(results[0].status==='rejected')throw results[0].reason;
+        targetResult=results[1];
+      } else j.prepared ??= await this.io.prepare(j.event);
       // Native voice confirmation is a local user interaction. No unconfirmed
       // transcript reaches the model; its handler resumes this same durable job.
       if(j.prepared.bridgeDisposition==='waiting_input') {
@@ -104,7 +114,8 @@ export class DurableInbox {
         atomicJson(path.join(this.dir,`sent-${candidate.replyKey}.json`),{sentAt:this.now(),local:true});
         this.save(candidate);Object.assign(j,candidate);return true;
       }
-      const target = await this.io.target();
+      if(targetResult?.status==='rejected')throw targetResult.reason;
+      const target = targetResult?targetResult.value:await this.io.target();
       if (!target) { this.save(j); return false; }
       j.rollout = target.rollout; j.cursor = fs.statSync(j.rollout).size;
       j.status = 'submitted'; j.submittedAt = this.now();

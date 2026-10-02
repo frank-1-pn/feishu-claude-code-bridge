@@ -47,7 +47,10 @@ import { DurableReplyRouter, selectReplyRoute } from './codex-bridge-reply-routi
 import { NativeInteractions } from './codex-bridge-native-runtime.mjs';
 import { CloudDocOutbox } from './codex-bridge-cloud-docs.mjs';
 import { hydrateNativeContext } from './codex-bridge-native-context.mjs';
-import { UX_PROMPT, bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
+import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
+import {buildIngressPrompt} from './codex-bridge-prompt.mjs';
+import {prepareReadonlyInput,readonlyEligible,validateReadonlyConfig,verifiedReadonly} from './codex-bridge-readonly.mjs';
+import {DeferredPerformance} from './codex-bridge-performance.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -149,6 +152,7 @@ function loadAndValidateConfig(bindingsPath) {
       if(binding[field]!==undefined && typeof binding[field]!=='boolean')throw new Error(`${bot}: ${field} must be a boolean`);
       if(binding[field]===true && binding.group_access!=='all_group_humans')throw new Error(`${bot}: ${field} requires all_group_humans`);
     }
+    validateReadonlyConfig(binding);
     if (typeof binding.profile !== 'string') throw new Error(`${bot}: profile must be a string`);
     if (profiles.has(binding.profile)) throw new Error(`${bot}: one runtime binding per Lark profile is required`);
     profiles.add(binding.profile);
@@ -342,22 +346,7 @@ function pruneInterruptedCodexOutputs() {
 }
 
 function buildPrompt(binding, event) {
-  const content = typeof event.content === 'string'
-    ? event.content
-    : JSON.stringify(event.content ?? '');
-  const prefix = `[飞书消息｜${binding.bot}｜${event.message_id ?? event.id ?? 'unknown'}] `
-    + `来源：sender_id=${event.sender_id ?? 'unknown'}；原消息时间=${event.create_time ?? event.timestamp ?? '未记录'}；回复=${event.parent_id ?? event.root_id ?? '无'}。`
-    + (binding.group_access === 'all_group_humans' ? `已通过绑定运营群人类成员校验。所有消息需在本会话可见；先判断是否需要行动或回复。无需回复时调用 node "${path.join(DAEMON_DIR,'codex-bridge-complete.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --disposition silent；这是结构化静默完成，成功后结束本轮，不发占位答复。本轮默认不发commentary或表情。运营事务须先调用 node \"${path.join(DAEMON_DIR,'codex-bridge-feedback.mjs')}\" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --state actionable；工具入队不等于生效，worker验证本消息marker后才启用该任务反馈。随后commentary必须以[飞书进度｜${event.message_id ?? event.id}]开头，才能按本消息回传进度卡。首次feedback必须单独调用，调用后立即给一条有意义的带标签commentary，再读取技能、台账或执行业务；不要把feedback与多项耗时读取合在一次工具调用里。与silent互斥，不为闲聊标actionable。` : '')
-    + (binding.group_access === 'all_group_humans' ? '请在当前线程处理，需要回复的事务先标actionable再以 final 交付结果；无需回复的消息逐条用完成工具处理。' : '已通过用户白名单。请在当前线程直接处理；阶段性工作进度可用 commentary 输出，bridge 会同步飞书，')
-    + '同一 message_id 的重复投递只视作同一请求，不重复执行已完成的操作。'
-    + '不要输出隐藏思考过程；最终答复只包含最终结果并由 bridge 回传。'
-    + `需要交付用户要求的本地文件时，用 node "${path.join(DAEMON_DIR, 'codex-bridge-send.mjs')}" --bot ${binding.bot} --job-id ${event.message_id ?? event.id} --file "绝对路径" 排入发送队列；只能提交用户要求的交付物，不能仅因链接提到了本地文件就上传。默认 --mode file；图片可用 image，音频 audio，视频 video 需 --cover 封面路径。文件限30MiB，图片10MiB，默认只允许当前工作目录。排队不等于送达。`
-    + UX_PROMPT
-    + (binding.group_access==='all_group_humans' ? '本轮全群策略的专用协议优先于通用输出习惯：未标actionable或无本消息[飞书进度｜message_id]标签的commentary仅在本session可见。无关、感谢或无需行动/回复的消息逐条调用上述silent完成工具，成功后不生成占位final；需要处理的运营事务正常final交付。不要用普通final文本充当静默信号。' : '')
-    + '若末尾为 ...(truncated)，先按 message_id 用现有 messages-mget 流程取全文。正文：';
-  return content.includes('\n') || content.includes('\r')
-    ? `${prefix}\n${content}`
-    : `${prefix}${content}`;
+  return buildIngressPrompt(binding,event,{daemonDir:DAEMON_DIR});
 }
 
 function runChild(file, args, options = {}) {
@@ -618,8 +607,8 @@ async function runPtyTurn(binding, event, prompt, replyPath, pty, onCommentary, 
   atomicWriteText(replyPath, reply);
 }
 
-async function runCodex(binding, event, replyPath) {
-  const prompt = buildPrompt(binding, event);
+async function runCodex(binding, event, replyPath, preparedPrompt) {
+  const prompt = preparedPrompt??buildPrompt(binding, event);
   const messageId = event.message_id ?? event.id ?? '';
   const progressState = { sentCount: 0, lastSentAt: 0 };
   const onCommentary = (text) => forwardCommentary(binding, messageId, text, progressState);
@@ -1175,12 +1164,14 @@ async function durableBotLoops(binding) {
   const final=createReplyDelivery({binding,actions,outbound,files,cloudDocs,nativeInteractions,getRoute,log,reportOptions:{
     reportRoot:path.join(DAEMON_DIR,'state','reports-v1'),fileOutboxRoot:path.join(DAEMON_DIR,'state','file-outbox'),inboxRoot:INBOX_ROOT,
   }});
+  const performance=new DeferredPerformance(path.join(DAEMON_DIR,'state','performance-v1'),{onError:category=>log(category,{bot:binding.bot})});
   inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
+    parallelPreparation:event=>readonlyEligible(binding,event),
     prepare: async event => {
       const hydrated=await hydrateNativeContext(binding,event,contextRequest);
       const job=inbox.jobs.get(event.message_id??event.id);
       const candidate={...job,event:hydrated};inbox.save(candidate);Object.assign(job,candidate);
-      return nativeInteractions.prepare(hydrated);
+      return prepareReadonlyInput(binding,hydrated,e=>nativeInteractions.prepare(e),{children:activeChildren});
     },
     target: async () => {
       const pty = await resolveActivePty(binding);
@@ -1188,15 +1179,18 @@ async function durableBotLoops(binding) {
       return { pty, rollout: findRolloutPath(binding.codex_thread_id) };
     },
     inject: async (job,target) => {
+      const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now});
+      job.readonlyPrefetchIncluded=!!verifiedReadonly(binding,job.prepared,now)?.result;
+      inbox.save(job);
       if(target.pty?.transport==='managed_app_server') {
-        await submitManagedTurn(target.pty,binding,buildPrompt(binding,job.prepared));
+        await submitManagedTurn(target.pty,binding,prompt);
       } else if (target.pty) {
-        await runPtyTurn(binding,job.event,buildPrompt(binding,job.prepared),'',target.pty,null,true);
+        await runPtyTurn(binding,job.event,prompt,'',target.pty,null,true);
       } else {
         // Without a live terminal, keep one resume writer at a time. Intake,
         // receipt and reply scanning still run independently and survive restart.
         const output = path.join(STATE_DIR,`headless-${digest(job.id)}.tmp`);
-        try { await runCodex(binding,job.prepared,output); }
+        try { await runCodex(binding,job.prepared,output,prompt); }
         finally { fs.rmSync(output,{force:true}); }
       }
     },
@@ -1304,7 +1298,8 @@ async function durableBotLoops(binding) {
     loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000),
     loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000),
     loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),
-    loop('reactions',()=>reactions?.flush(),1000)]);
+    loop('reactions',()=>reactions?.flush(),1000),
+    loop('performance',()=>performance.observe(binding.bot,inbox.jobs.values()),1000)]);
 }
 
 let args;
