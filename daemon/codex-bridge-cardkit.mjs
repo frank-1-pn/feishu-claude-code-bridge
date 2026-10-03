@@ -103,6 +103,8 @@ export async function updateStreamCard({file,s,final,binding,request,now,onMessa
   // Finish an uncertain operation with its original sequence+uuid before
   // advancing. This also drains an older queued progress snapshot before final.
   const apply=async operation=>{
+    const timingSource=operation.timingAttemptedAt!==undefined?'reconciled_observation':'send_response';
+    if(operation.timingAttemptedAt===undefined)merge({cardPending:{...operation,timingAttemptedAt:now()}});
     await request(binding,['api','PUT',operation.endpoint,'--data',JSON.stringify(operation.body)]);
     const latest=read();latest.cardSequence=operation.sequence;delete latest.cardPending;
     latest.lastAppliedCard=appliedCard(latest.lastAppliedCard,operation);
@@ -119,7 +121,7 @@ export async function updateStreamCard({file,s,final,binding,request,now,onMessa
     }
     // A partially applied collection of element changes is not a delivered
     // revision. Recovery resumes the remaining operations before newer output.
-    if(completed){latest.sentRevision=operation.revision;latest.lastSentAt=now();latest.retryAt=0;latest.attempts=0;delete latest.error;delete latest.blocked;}
+    if(completed){latest.sentRevision=operation.revision;latest.lastSentAt=now();latest.lastAppliedEvidence={schema:1,at:latest.lastSentAt,source:timingSource,revision:operation.revision};latest.retryAt=0;latest.attempts=0;delete latest.error;delete latest.blocked;}
     if(operation.final)latest.cardClosed=true;
     atomicWriteJson(file,latest);return latest;
   };

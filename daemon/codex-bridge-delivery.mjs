@@ -16,7 +16,7 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
     }
     // Card-only reconciliation must bypass reports, uploads and action setup.
     if(outbound.replyDelivered?.(replyKey)) {
-      await deliver.closeCards(replyKey,streamKeys,context);return;
+      await deliver.closeCards(replyKey,streamKeys,context);return outbound.replyDeliveryEvidence?.(replyKey)??null;
     }
     const clean=sanitizeFeishuReply(value).trim();
     const ux=parseReplyUx(clean);
@@ -78,7 +78,7 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
         }
       }catch{unavailable('reply_native_actions_unavailable',context.jobId);}
     }
-    await outbound.final(ux.form && !presentation.actionContext ? presentation.fallbackText : ux.text,replyKey,streamKeys,presentation);
+    return outbound.final(ux.form && !presentation.actionContext ? presentation.fallbackText : ux.text,replyKey,streamKeys,presentation);
   };
   deliver.closeCards=async (replyKey,streamKeys=[],context={})=>{
     const keys=[];

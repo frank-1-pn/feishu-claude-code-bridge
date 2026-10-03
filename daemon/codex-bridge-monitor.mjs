@@ -5,6 +5,7 @@ import {atomicWriteJson} from './codex-bridge-storage.mjs';
 import {bindingSnapshot,isBoundJob} from './codex-bridge-ux.mjs';
 import {isAuthorizedMessage} from './codex-bridge-authorization.mjs';
 import {performanceMetadata} from './codex-bridge-performance.mjs';
+import {sourceTimestamp,normalizeMetricsEpoch,metricsEpochKey,aggregateEpochMetrics,intakeEpochMatches,finalTiming} from './codex-bridge-metrics.mjs';
 import {privateDirectory,readBackgroundJson,publishBackgroundJson,stableJson} from './codex-bridge-background-store.mjs';
 
 const kinds=new Set(['queued_stalled','delivery_stalled','reply_stalled','reply_blocked','background_queued_stalled','background_blocked','background_indeterminate','transport_unhealthy','delivery_unhealthy']);
@@ -64,11 +65,15 @@ export function aggregateMonitorSamples(samples,{now=Date.now(),windowMs=8640000
 // caller submits its private outbox on the original source route, once only.
 export class DurableMonitor {
   constructor({root,binding,now=Date.now,thresholds={},persistMs=30000,recoveryMs=30000,cooldownMs=1800000,
-    windowMs=86400000,maxSamples=2048,evidenceLabel='runtime_observation'}) {
+    windowMs=86400000,maxSamples=2048,evidenceLabel='runtime_observation',metricsEpoch,metricsStatus}) {
     if(!/^[A-Za-z0-9_-]{1,64}$/.test(binding?.bot??'') || !['runtime_observation','test_fixture'].includes(evidenceLabel))throw errors('monitor_config_invalid');
     for(const value of [persistMs,recoveryMs,cooldownMs,windowMs,maxSamples])if(!Number.isSafeInteger(value) || value<1)throw errors('monitor_config_invalid');
     this.binding=binding;this.scope=digest(stableJson(bindingSnapshot(binding)));this.now=now;
     Object.assign(this,{persistMs,recoveryMs,cooldownMs,windowMs,maxSamples,evidenceLabel});
+    this.metricsEpoch=normalizeMetricsEpoch(metricsEpoch,{now:now()});
+    this.metricsStatus=this.metricsEpoch?{enabled:true,status:this.metricsEpoch.frozenAt===undefined?'enabled':'frozen',reason:null}
+      :{enabled:false,status:metricsEpoch===undefined?'missing':'invalid',reason:metricsEpoch===undefined?'metrics_policy_missing':'metrics_policy_invalid'};
+    if(!this.metricsEpoch && metricsStatus?.enabled===false && ['missing','invalid'].includes(metricsStatus.status))this.metricsStatus={enabled:false,status:metricsStatus.status,reason:metricsStatus.status==='missing'?'metrics_policy_missing':'metrics_policy_invalid'};
     this.thresholds={queued:120000,delivery:120000,reply:120000,backgroundQueued:120000,...thresholds};
     if(Object.keys(this.thresholds).some(k=>!['queued','delivery','reply','backgroundQueued'].includes(k)) || Object.values(this.thresholds).some(v=>!Number.isSafeInteger(v) || v<1))throw errors('monitor_config_invalid');
     this.root=path.resolve(root);this.dir=path.join(this.root,binding.bot,this.scope);
@@ -78,6 +83,22 @@ export class DurableMonitor {
     if(this.state.schema!==1 || this.state.scope!==this.scope || this.state.evidence!==evidenceLabel
       || !this.state.conditions || typeof this.state.conditions!=='object' || Array.isArray(this.state.conditions)
       || !this.state.samples || typeof this.state.samples!=='object' || Array.isArray(this.state.samples))throw errors('monitor_state_invalid');
+    this.state.epochs??={};
+    if(!this.state.epochs || typeof this.state.epochs!=='object' || Array.isArray(this.state.epochs))throw errors('monitor_state_invalid');
+    for(const [key,value] of Object.entries(this.state.epochs)) {
+      const stored=normalizeMetricsEpoch(value?.epoch,{now:now()});
+      if(!stored || key!==metricsEpochKey(stored) || [value.requests,value.samples,value.resultDeliveries??{}]
+          .some(v=>!v || typeof v!=='object' || Array.isArray(v)))throw errors('monitor_state_invalid');
+    }
+    if(this.metricsEpoch) {
+      const key=metricsEpochKey(this.metricsEpoch),prior=this.state.epochs[key];
+      // A closed epoch is immutable, including after policy accidentally opens it.
+      if(prior?.epoch?.frozenAt!==undefined)this.metricsEpoch={...prior.epoch};
+      this.state.epochs[key]??={epoch:this.metricsEpoch,requests:{},samples:{}};
+      this.state.epochs[key].epoch=this.metricsEpoch;
+      this.metricsStatus.status=this.metricsEpoch.frozenAt===undefined?'enabled':'frozen';
+      this.save();
+    }
     // The claim may have reached disk before the mutable submitted checkpoint.
     for(const alert of this.alerts())if(alert.status==='pending' && this.claimed(alert.id)) {
       alert.status='unknown';alert.errorCategory='submission_interrupted';this.saveAlert(alert);
@@ -128,11 +149,13 @@ export class DurableMonitor {
       if(replyBlocked)add('reply_blocked',job.id,job,replyAge,'jobs');
       else if(job.status==='reply_pending' && replyAge!==null && replyAge>=this.thresholds.reply)add('reply_stalled',job.id,job,replyAge,'jobs');
       const source=monitorSource(this.binding,job,all);
-      if(source && ['done','failed'].includes(job.status)) {
+      if(source && job.event?.synthetic_callback!==true)this.epochRequest(source,at);
+      if(source && job.event?.synthetic_callback!==true && ['done','failed'].includes(job.status)) {
         const key=digest(`monitor-sample\0${this.scope}\0reply\0${job.id}`),prior=this.state.samples[key];
         const record=performanceMetadata(this.binding.bot,job);
         this.state.samples[key]={key,type:'reply',status:job.status,at:number(job.completedAt)??prior?.at??at,
           atSource:number(job.completedAt)===null?'first_observation':'completion',timings:durations(record),sources:record.sources};
+        this.epochSample(this.state.samples[key],source,at);
       }
     }
     if(backgrounds)for(const task of backgrounds) {
@@ -145,6 +168,8 @@ export class DurableMonitor {
         const key=digest(`monitor-sample\0${this.scope}\0background\0${task.id}`),prior=this.state.samples[key];
         this.state.samples[key]={key,type:'background',status:task.status,at:number(task.completedAt)??prior?.at??at,
           atSource:number(task.completedAt)===null?'first_observation':'completion'};
+        this.epochSample(this.state.samples[key],monitorSource(this.binding,source,all),at);
+        if(task.status==='completed')this.epochResultDelivery(task,monitorSource(this.binding,source,all),at);
       }
     }
     const activeSources=all?[...all.values()].filter(j=>['queued','submitted','delivered','reply_pending'].includes(j.status) || j.replyRetry?.blocked || j.replyCardRetry?.blocked):[];
@@ -190,6 +215,38 @@ export class DurableMonitor {
       transport_healthy:typeof health?.transport_healthy==='boolean'?health.transport_healthy:null,delivery_healthy:typeof health?.delivery_healthy==='boolean'?health.delivery_healthy:null};
     this.save();return this.stats();
   }
+  epochRequest(source,at) {
+    if(!this.metricsEpoch || at> (this.metricsEpoch.frozenAt??at))return;
+    const epoch=this.state.epochs[metricsEpochKey(this.metricsEpoch)],key=digest(`epoch-source\0${this.scope}\0${source.id}`);
+    const sourceAt=sourceTimestamp(source.event);
+    if(sourceAt!==null && (sourceAt<this.metricsEpoch.startedAt || sourceAt>at))return;
+    const prior=epoch.requests[key];
+    const intakeVerified=intakeEpochMatches(source,this.metricsEpoch);
+    epoch.requests[key]={key,sourceAt,observedAt:prior?.observedAt??at,status:source.status,intakeVerified,
+      intakeState:intakeVerified?'matched':source.intakeEpoch?'other':'missing',
+      statusObservedAt:prior?.status===source.status?prior.statusObservedAt:at};
+  }
+  epochSample(sample,source,at) {
+    if(!this.metricsEpoch || at>(this.metricsEpoch.frozenAt??at))return;
+    const sourceAt=sourceTimestamp(source.event);
+    if(sourceAt===null || sourceAt<this.metricsEpoch.startedAt || sourceAt>at || !intakeEpochMatches(source,this.metricsEpoch))return;
+    const epoch=this.state.epochs[metricsEpochKey(this.metricsEpoch)],prior=epoch.samples[sample.key];
+    const changed=!prior || stableJson({...prior,sourceAt:undefined,observedAt:undefined,intakeVerified:undefined})!==stableJson({...sample,sourceAt:undefined,observedAt:undefined});
+    epoch.samples[sample.key]={...sample,sourceAt,intakeVerified:true,observedAt:changed?at:prior.observedAt};
+  }
+  epochResultDelivery(task,source,at) {
+    if(!this.metricsEpoch || at>(this.metricsEpoch.frozenAt??at) || !intakeEpochMatches(source,this.metricsEpoch))return;
+    const sourceAt=sourceTimestamp(source.event);
+    if(sourceAt===null || sourceAt<this.metricsEpoch.startedAt || sourceAt>at)return;
+    const epoch=this.state.epochs[metricsEpochKey(this.metricsEpoch)],key=digest(`epoch-result-delivery\0${this.scope}\0${task.id}`);
+    epoch.resultDeliveries??={};
+    const verified=task.resultDeliveryVerified===true && task.resultDeliveryStatus==='done';
+    const timing=verified?finalTiming({...source,finalDeliveryEvidence:task.resultDeliveryEvidence,completedAt:undefined}):{at:null,source:'missing'};
+    const record={key,sourceAt,intakeVerified:true,status:verified?'done':'pending',source:timing.at>at?'missing':timing.source,
+      durationMs:timing.at!==null && timing.at>=sourceAt && timing.at<=at?timing.at-sourceAt:null};
+    const prior=epoch.resultDeliveries[key],same=prior && stableJson({...prior,observedAt:undefined})===stableJson(record);
+    epoch.resultDeliveries[key]={...record,observedAt:same?prior.observedAt:at};
+  }
   pendingAlerts(){return this.alerts().filter(a=>a.status==='pending' && !this.claimed(a.id));}
   beginSubmission(id,{jobs}={}) {
     const alert=this.readAlert(id);if(!alert || alert.status!=='pending' || this.claimed(id))return null;
@@ -222,6 +279,8 @@ export class DurableMonitor {
       monitor_sent_alert_count:count('sent'),monitor_recovered_condition_count:conditions.filter(c=>!c.breaching && (age(this.now(),c.clearedAt)??-1)>=this.recoveryMs).length,
       monitor_recovering_condition_count:conditions.filter(c=>!c.breaching && (age(this.now(),c.clearedAt)??-1)<this.recoveryMs).length,monitor_active_condition_count:conditions.filter(c=>c.breaching).length,
       monitor_private_diagnostic_count:conditions.filter(c=>c.breaching && !c.sourceJobId).length,
-      snapshot:this.state.snapshot??null,aggregate:aggregateMonitorSamples(Object.values(this.state.samples),{now:this.now(),windowMs:this.windowMs,maxSamples:this.maxSamples,evidenceLabel:this.evidenceLabel})};
+      snapshot:this.state.snapshot??null,metrics:this.metricsStatus,
+      epochAggregate:this.metricsEpoch?aggregateEpochMetrics(this.state.epochs[metricsEpochKey(this.metricsEpoch)],this.metricsEpoch,{now:this.now(),evidenceLabel:this.evidenceLabel}):null,
+      aggregate:{...aggregateMonitorSamples(Object.values(this.state.samples),{now:this.now(),windowMs:this.windowMs,maxSamples:this.maxSamples,evidenceLabel:this.evidenceLabel}),scope:'historical_observation'}};
   }
 }

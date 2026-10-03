@@ -6,6 +6,7 @@ import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 import { isAuthorizedMessage } from './codex-bridge-authorization.mjs';
 import { readDisposition } from './codex-bridge-completion.mjs';
 import { atomicWriteJson } from './codex-bridge-storage.mjs';
+import {makeResearchSnapshot,validateResearchSnapshot,verifyResearchEvidence} from './codex-bridge-research.mjs';
 
 export const backgroundFailure=code=>Object.assign(Error(code),{code});
 export const stableJson=value=>JSON.stringify(value,(_key,item)=>item && typeof item==='object' && !Array.isArray(item)
@@ -114,7 +115,7 @@ function requestFields(task) {
     runAtInput:task.runAtInput,timeoutMs:task.timeoutMs,binding:task.binding,sourceFingerprint:task.sourceFingerprint,
     inboxRoot:task.inboxRoot,sourceEvent:task.sourceEvent,codexCliJs:task.codexCliJs,codexHome:task.codexHome,
     ...(task.priority!==undefined?{priority:task.priority}:{}),...(task.budget!==undefined?{budget:task.budget}:{}),
-    ...(task.delegation!==undefined?{delegation:task.delegation}:{})};
+    ...(task.delegation!==undefined?{delegation:task.delegation}:{}),...(task.research!==undefined?{research:task.research}:{})};
 }
 export function readBackgroundTask(root,binding,taskId) {
   if(!/^[a-f0-9]{64}$/.test(taskId??''))throw backgroundFailure('background_task_identity_invalid');
@@ -125,7 +126,7 @@ export function readBackgroundTask(root,binding,taskId) {
       || !Number.isFinite(task.createdAt) || !Number.isFinite(task.runAt) || task.runAt!==(task.runAtInput===null?task.createdAt:Date.parse(task.runAtInput))
       || digest(stableJson(requestFields(task)))!==task.requestHash)throw backgroundFailure('background_task_changed');
   if(task.priority!==undefined && !BACKGROUND_PRIORITIES.includes(task.priority))throw backgroundFailure('background_priority_invalid');
-  backgroundBudget(task);return task;
+  backgroundBudget(task);validateResearchSnapshot(task);return task;
 }
 export function validateBackgroundTaskSource(task,{inboxRoot,binding,completionRoot,active=false}) {
   if(stableJson(task.binding)!==stableJson(backgroundBinding(binding)) || task.inboxRoot!==path.resolve(inboxRoot))
@@ -134,7 +135,7 @@ export function validateBackgroundTaskSource(task,{inboxRoot,binding,completionR
   if(stableJson(sourceFingerprint(job))!==stableJson(task.sourceFingerprint))throw backgroundFailure('background_source_changed');
   return job;
 }
-export function enqueueBackgroundTask({root,inboxRoot,binding,jobId,taskKey,title,promptFile,promptText,runAt,timeoutMs=1800000,priority,budget,delegation,maxQueued=BACKGROUND_QUEUE_LIMIT,
+export function enqueueBackgroundTask({root,inboxRoot,binding,jobId,taskKey,title,promptFile,promptText,sourcesFile,runAt,timeoutMs=1800000,priority,budget,delegation,maxQueued=BACKGROUND_QUEUE_LIMIT,
   codexCliJs,codexHome,completionRoot=path.join(path.dirname(root),'completions-v1'),now=Date.now}) {
   if(!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(taskKey??'') || typeof title!=='string' || !title.trim() || title.length>200)
     throw backgroundFailure('background_request_invalid');
@@ -160,8 +161,9 @@ export function enqueueBackgroundTask({root,inboxRoot,binding,jobId,taskKey,titl
   const runAtInput=runAt===undefined?null:new Date(runAt).toISOString();
   if(!path.isAbsolute(codexCliJs??'') || !path.isAbsolute(codexHome??''))throw backgroundFailure('background_runtime_invalid');
   const createdAt=now(),id=backgroundTaskId(binding.bot,jobId,taskKey);
+  const research=sourcesFile===undefined?undefined:makeResearchSnapshot({root,binding,codexHome,sourcesFile});
   const task={schema:1,id,bot:binding.bot,sourceJobId:jobId,taskKey,title:title.trim(),prompt,createdAt,
-    runAt:runAtInput===null?createdAt:Date.parse(runAtInput),runAtInput,timeoutMs,priority:selectedPriority,budget:executionBudget,...(delegation?{delegation}:{}),codexCliJs,codexHome,cwd,
+    runAt:runAtInput===null?createdAt:Date.parse(runAtInput),runAtInput,timeoutMs,priority:selectedPriority,budget:executionBudget,...(delegation?{delegation}:{}),...(research?{research}:{}),codexCliJs,codexHome,cwd,
     inboxRoot:path.resolve(inboxRoot),binding:backgroundBinding(binding),sourceFingerprint:sourceFingerprint(source),sourceEvent:Object.fromEntries(['type','message_id','chat_id','chat_type','sender_id','sender_type','mentions','root_id','parent_id','thread_id','create_time','timestamp'].filter(key=>source.event[key]!==undefined).map(key=>[key,source.event[key]]))};
   task.requestHash=digest(stableJson(requestFields(task)));
   if(Buffer.byteLength(stableJson(task)+'\n')>128*1024)throw backgroundFailure('background_snapshot_too_large');
@@ -195,8 +197,20 @@ export function backgroundTaskStatus({root,inboxRoot,binding,jobId,taskKey}) {
   const taskId=backgroundTaskId(binding.bot,jobId,taskKey),task=readBackgroundTask(root,binding,taskId);
   if(task.sourceJobId!==jobId || task.taskKey!==taskKey)throw backgroundFailure('background_task_source_mismatch');
   validateBackgroundTaskSource(task,{inboxRoot,binding});
-  const schedule=readBackgroundJson(path.join(root,binding.bot,taskId,'schedule.json'),{optional:true});
-  return {taskId,status:schedule?.status??'queued',notification:schedule?.notification?.status??'pending',delivered:schedule?.notification?.status==='notified'};
+  const dir=path.join(root,binding.bot,taskId),schedule=readBackgroundJson(path.join(dir,'schedule.json'),{optional:true});
+  let research;
+  if(task.research) {
+    research={version:1,mode:'bounded_public_get',configuredSourceCount:task.research.sourceUrls.length,policySha256:task.research.policySha256};
+    const run=readBackgroundJson(path.join(dir,'run.json'),{optional:true});
+    if(run?.status==='completed') {
+      const claim=readBackgroundJson(path.join(dir,'claim.json'));
+      if(run.taskId!==task.id || run.nonce!==claim.nonce || run.taskSha256!==digest(privateRead(path.join(dir,'task.json'))))throw backgroundFailure('research_evidence_invalid');
+      const bytes=privateRead(path.join(dir,'result.txt'),{maxBytes:backgroundBudget(task).maxOutputBytes});
+      if(bytes.length!==run.resultBytes || digest(bytes)!==run.resultSha256)throw backgroundFailure('research_evidence_invalid');
+      research={...research,...verifyResearchEvidence(dir,{task,nonce:run.nonce,manifestSha256:run.researchEvidence?.manifestSha256,resultText:bytes.toString('utf8')})};
+    }
+  }
+  return {taskId,status:schedule?.status??'queued',notification:schedule?.notification?.status??'pending',delivered:schedule?.notification?.status==='notified',...(research?{research}:{})};
 }
 export function cancelBackgroundTask(options) {
   const status=backgroundTaskStatus(options),dir=path.join(options.root,options.binding.bot,status.taskId);

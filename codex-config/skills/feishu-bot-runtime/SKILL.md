@@ -33,6 +33,10 @@ description: 连接、排查现有飞书 bot 与 Codex bridge，处理绑定会�
 - 卡片排版、修改按钮、批量条件表单、状态显示、报告和附件：读 [references/interaction-and-delivery.md](references/interaction-and-delivery.md)。bridge 的入站提示已携带基本输出协议；无需在每轮重复加载无关操作流程。
 - 收到文件后的文档整理、主题归类、本地知识库/项目附件/飞书云空间归档：读 [references/document-organization.md](references/document-organization.md)。默认去向从当前 bot 私有配置读取；收到或备份文件不等于已整理完成。
 - 需要长任务独立运行、延后执行、查询或取消后台子任务：读 [references/background-tasks.md](references/background-tasks.md)。持久调度负责运行和恢复，主会话审查结果并保留业务写入权。
+- 后台草稿需要最新公开资料或真实来源核验：读 [references/research-sources.md](references/research-sources.md)。只在独立 scoped policy 已核验启用且本任务明确提供 sources-file 时受限 GET；主会话先实际检索/open选 URL，后台不任意搜索，未抓取来源不编造引用。
+- 多人业务任务、待补条件、资源修改冲突：读 [references/collaboration-context.md](references/collaboration-context.md)。只读关联不代替权限；注册/提案/裁决必须核验原私有消息、marker、actionable及最新版本。
+- 新版本性能窗口或真实群验收：读 [references/deployment-metrics-and-acceptance.md](references/deployment-metrics-and-acceptance.md)。历史另列，真实响应时间与恢复观察分开，合成回调不增加人类分母。
+- 配置这三项或接管本轮运行时：读 [references/ops-round2.md](references/ops-round2.md)，保持原订阅、绑定和 writer；安装读回与真人群闭环分别记录。
 - 运营异常监测、性能聚合、自动研究分流或后台任务控制：读 [references/ops-experience.md](references/ops-experience.md)。这些能力只在维护者核验的私有 scoped policy 启用后生效；源码文档不证明本机已安装或真实群已验收。
 - 仅检查文档或调整输出规范时，不启动、重启或重新绑定运行时。
 

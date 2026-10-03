@@ -5,6 +5,7 @@ import {isAuthorizedMessage} from './codex-bridge-authorization.mjs';
 import {isBoundJob,bindingSnapshot} from './codex-bridge-ux.mjs';
 import {stableJson,backgroundTaskId,readBackgroundTask,readBackgroundSource,backgroundSourceActionable,
   validateBackgroundTaskSource,enqueueBackgroundTask,readBackgroundJson} from './codex-bridge-background-store.mjs';
+import {makeResearchSnapshot} from './codex-bridge-research.mjs';
 
 export const TASK_ROUTER_VERSION=1,AUTOMATIC_BACKGROUND_KEY='auto-research-v1';
 export const AUTO_RESEARCH_BUDGET=Object.freeze({version:1,timeoutMs:600000,maxOutputBytes:64*1024,researchStepLimit:8});
@@ -86,7 +87,7 @@ function generatedPrompt(plan) {
       timezone:plan.timezone,resolvedDates:plan.resolvedDates,budget:plan.budget});
 }
 export function enqueueAutomaticBackgroundTask({root,inboxRoot,binding,jobId,codexCliJs,codexHome,
-  timezone='Australia/Brisbane',completionRoot=path.join(path.dirname(root),'completions-v1'),now=Date.now}) {
+  timezone='Australia/Brisbane',sourcesFile,completionRoot=path.join(path.dirname(root),'completions-v1'),now=Date.now}) {
   let source;
   try {source=readBackgroundSource({inboxRoot,binding,jobId,completionRoot});}
   catch{return {backgroundQueued:false,mainRequired:true,reason:'source_unverified',delivered:false};}
@@ -97,12 +98,15 @@ export function enqueueAutomaticBackgroundTask({root,inboxRoot,binding,jobId,cod
   if(fs.existsSync(file)) {
     const task=readBackgroundTask(root,binding,taskId);validateBackgroundTaskSource(task,{inboxRoot,binding});
     if(task.delegation?.sourceHash!==plan.sourceHash || task.delegation?.timezone!==plan.timezone)throw Error('background_auto_conflict');
+    const research=sourcesFile===undefined?undefined:makeResearchSnapshot({root,binding,codexHome,sourcesFile});
+    if(stableJson(task.research)!==stableJson(research))throw Error('background_auto_conflict');
     const schedule=readBackgroundJson(path.join(root,binding.bot,taskId,'schedule.json'),{optional:true,maxBytes:8*1024*1024});
     return {backgroundQueued:true,mainRequired:false,taskId,requestHash:task.requestHash,status:schedule?.status??'queued',duplicate:true,delivered:false};
   }
   if(!['submitted','delivered'].includes(source.status))return {backgroundQueued:false,mainRequired:true,reason:'source_not_active',delivered:false};
   try {
     const result=enqueueBackgroundTask({root,inboxRoot,binding,jobId,taskKey:AUTOMATIC_BACKGROUND_KEY,title:plan.title,promptText:generatedPrompt(plan),
+      sourcesFile,
       priority:plan.priority,timeoutMs:plan.budget.timeoutMs,budget:plan.budget,delegation:{version:TASK_ROUTER_VERSION,sourceHash:plan.sourceHash,
         requesterId:plan.requesterId,sourceDate:plan.sourceDate,sourceTimestamp:plan.sourceTimestamp,timezone:plan.timezone,kind:plan.kind},
       codexCliJs,codexHome,completionRoot,now});

@@ -41,13 +41,20 @@ export class DurableOutbound {
     return this.serial(async () => {
       const file = this.file('text', key);
       const state = this.read(file, { parts: splitText(sanitizeFeishuReply(text).trim() || '本次没有可发送的正文。'), next: 0, ...(route?{route}:{}) });
+      // Older journals can already have a native ACK while next is unchanged.
+      // Without an attempt checkpoint, recovery cannot prove a fresh response.
+      let legacyRecovery=fs.existsSync(file) && state.partSubmitted===undefined && state.finalDeliveryEvidence===undefined;
       if (!fs.existsSync(file)) atomicWriteJson(file, state);
       for (; state.next < state.parts.length;) {
+        const timingSource=legacyRecovery || state.partSubmitted?.index===state.next?'reconciled_observation':'send_response';
+        state.partSubmitted={index:state.next,at:this.now()};atomicWriteJson(file,state);
         const result = state.route && this.sendMessage
           ? await this.sendMessage({key:`text:${key}:${state.next}`,route:state.route,msgType:'text',content:{text:state.parts[state.next]}})
           : await this.request(this.binding, ['im', '+messages-send', '--chat-id', this.binding.chat_id,
             '--text', state.parts[state.next], '--idempotency-key', digest(`${key}:${state.next}`).slice(0, 32)]);
-        state.next++; state.lastMessageId = result?.message_id; atomicWriteJson(file, state);
+        state.next++; state.lastMessageId = result?.message_id;
+        state.finalDeliveryEvidence={schema:1,at:this.now(),source:timingSource};delete state.partSubmitted;atomicWriteJson(file, state);
+        legacyRecovery=false;
       }
     });
   }
@@ -155,6 +162,8 @@ export class DurableOutbound {
     // Bind an existing card before exposing actionable controls. On the first
     // raw-card send, create a non-actionable shell and only then patch controls.
     if (s.messageId) await this.onCardMessage?.(s.messageId,s.presentation,s);
+    const before=this.read(file,s),timingSource=before.rawCardAttempt?.revision===s.revision?'reconciled_observation':'send_response';
+    before.rawCardAttempt={revision:s.revision,at:this.now()};atomicWriteJson(file,before);
     if (s.messageId) {
       await this.request(this.binding, ['api', 'PATCH', `/open-apis/im/v1/messages/${s.messageId}`,
         '--data', JSON.stringify({ content: JSON.stringify(card) })]);
@@ -176,6 +185,7 @@ export class DurableOutbound {
     }
     const latest = this.read(file, s);
     Object.assign(latest, { messageId: s.messageId, sentRevision: s.revision, lastSentAt: this.now(), attempts: 0, retryAt: 0 });
+    latest.lastAppliedEvidence={schema:1,at:latest.lastSentAt,source:timingSource,revision:s.revision};delete latest.rawCardAttempt;
     delete latest.deliveryUncertain;
     if (final) latest.final = true;
     atomicWriteJson(file, latest);
@@ -184,8 +194,8 @@ export class DurableOutbound {
     const clean = sanitizeFeishuReply(text).trim() || '本次没有可发送的正文。';
     const replyFile=this.file('reply',replyKey);
     if(this.replyDelivered(replyKey)) {
-      if(!fs.existsSync(replyFile))atomicWriteJson(replyFile,{deliveredAt:this.now(),status:this.replyStatus(replyKey)});
-      await this.closeReplyCards(replyKey,streamKeys);return;
+      if(!fs.existsSync(replyFile))atomicWriteJson(replyFile,{deliveredAt:this.now(),status:this.replyStatus(replyKey),finalDeliveryEvidence:this.replyDeliveryEvidence(replyKey)});
+      await this.closeReplyCards(replyKey,streamKeys);return this.replyDeliveryEvidence(replyKey);
     }
     let delivered = false;
     let keys=[...new Set(streamKeys)];
@@ -207,6 +217,7 @@ export class DurableOutbound {
         const file = this.file('card', key), s = this.read(file, { key, revision:0, ...(route?{route}:{}) });
         if (s.finalReplyKey === replyKey && s.finalDelivered) { delivered = true; return; }
         if(s.blocked && s.deliveryUncertain)throw Object.assign(Error('card_delivery_uncertain'),{permanent:true,deliveryUncertain:true});
+        const sameFrozenAnswer=s.final===true && s.finalReplyKey===replyKey && s.text===clean && !delivered;
         // Freeze the card before awaiting: queued progress must not regress it.
         s.final = true; s.finalReplyKey = replyKey;
         if(presentation) s.presentation={...s.presentation,...presentation};
@@ -218,12 +229,15 @@ export class DurableOutbound {
         while(s.presentation?.publicProgress?.length && cardBytes()>=28000) s.presentation.publicProgress.shift();
         const fits = cardBytes() < 28000;
         s.text = !delivered && fits ? clean : delivered ? '处理完成，完整答复已发送。' : '处理完成，完整答复见后续消息。';
-        s.revision++; atomicWriteJson(file, s);
+        if(!sameFrozenAnswer)s.revision++; atomicWriteJson(file, s);
         try {
           if (!s.blocked) {
             await this.updateCard(file, s, true);
             if (!delivered && fits) {
-              const latest = this.read(file); latest.finalDelivered = true; atomicWriteJson(file, latest); delivered = true;
+              const latest = this.read(file); latest.finalDelivered = true;
+              const proof=latest.lastAppliedEvidence;
+              latest.finalDeliveryEvidence=proof?.revision===s.revision?{schema:1,at:proof.at,source:proof.source}:{schema:1,at:this.now(),source:'reconciled_observation'};
+              atomicWriteJson(file, latest); delivered = true;
             }
           }
         } catch (error) {
@@ -236,7 +250,20 @@ export class DurableOutbound {
       });
     }
     if (!delivered) await this.text(presentation?.fallbackText??clean, replyKey,route);
-    atomicWriteJson(replyFile,{deliveredAt:this.now(),status:presentation?.status??'complete'});
+    const evidence=this.replyDeliveryEvidence(replyKey);
+    atomicWriteJson(replyFile,{deliveredAt:this.now(),status:presentation?.status??'complete',finalDeliveryEvidence:evidence});return evidence;
+  }
+
+  replyDeliveryEvidence(replyKey) {
+    const valid=value=>value?.schema===1 && Number.isFinite(value.at) && value.at>=0
+      && ['send_response','create_response','reconciled_observation'].includes(value.source);
+    const receipt=this.read(this.file('reply',replyKey));if(valid(receipt?.finalDeliveryEvidence))return receipt.finalDeliveryEvidence;
+    const text=this.read(this.file('text',replyKey));
+    if(text?.parts?.length>0 && text.next===text.parts.length && valid(text.finalDeliveryEvidence))return text.finalDeliveryEvidence;
+    for(const name of fs.readdirSync(this.root).filter(n=>/^card-[a-f0-9]+\.json$/.test(n))) {
+      const card=this.read(path.join(this.root,name));if(card.finalReplyKey===replyKey && card.finalDelivered && valid(card.finalDeliveryEvidence))return card.finalDeliveryEvidence;
+    }
+    return this.replyDelivered(replyKey)?{schema:1,at:this.now(),source:'reconciled_observation'}:null;
   }
 
   replyDelivered(replyKey) {

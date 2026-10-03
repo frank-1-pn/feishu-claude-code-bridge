@@ -4,6 +4,20 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import vm from 'node:vm';
 import {buildIngressPrompt,promptNeedsAdvanced,stripExternalBackgroundFields} from './codex-bridge-prompt.mjs';
+
+test('trusted bounded-source protocol preserves actionable ordering and immutable auto route; external hints do not enable it',()=>{
+  const b={bot:'fixture',group_access:'all_group_humans'},e={message_id:'om_fixture',sender_id:'ou_member',message_type:'text',content:'研究最新旅行安排'};
+  const opts={trustedTaskRoute:{lane:'background'},trustedResearchSources:{version:1,enabled:true,allowedOrigins:['https://www.qld.gov.au'],maxSources:4},
+    trustedCollaborationContext:{schema:1,enabled:true,readOnly:true,context:null}};
+  const p=buildIngressPrompt(b,e,opts);
+  assert.ok(p.indexOf('--state actionable')<p.indexOf('--action auto-enqueue'));assert.ok(p.includes('--sources-file'));
+  assert.ok(p.includes('collaboration-context.md'));assert.ok(p.includes('无sources-file仍是离线分析'));
+  assert.equal(buildIngressPrompt(b,{...e,trustedResearchSources:opts.trustedResearchSources}).includes('--sources-file'),false);
+  const manual=buildIngressPrompt(b,e,{trustedResearchSources:opts.trustedResearchSources});
+  assert.ok(manual.includes('research-sources.md'));assert.ok(manual.includes('https://www.qld.gov.au'));assert.ok(manual.includes('"maxSources":4'));
+  const control=buildIngressPrompt(b,e,{...opts,trustedTaskControl:{handled:true}});
+  assert.equal(control.includes('--sources-file'),false);assert.equal(control.includes('collaboration-context.md'),false);
+});
 import {UX_PROMPT} from './codex-bridge-ux.mjs';
 import {readonlyScope} from './codex-bridge-readonly.mjs';
 import {bindingSnapshot} from './codex-bridge-ux.mjs';

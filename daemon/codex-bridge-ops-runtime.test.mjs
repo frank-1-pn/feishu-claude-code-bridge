@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {createOpsRuntime,stripExternalOpsFields} from './codex-bridge-ops-runtime.mjs';
+import {createOpsRuntime,stripExternalOpsFields,OPS_DEPLOYMENT_ID} from './codex-bridge-ops-runtime.mjs';
 import {opsScope} from './codex-bridge-ops-policy.mjs';
 import {DurableInbox,digest} from './codex-bridge-inbox.mjs';
 import {bindingSnapshot} from './codex-bridge-ux.mjs';
@@ -58,7 +58,10 @@ test('fresh absent policy disables all feature work without state creation or br
   const f=fixture(t,{policy:false}),job=f.add('现在有哪些任务');
   assert.equal((await f.ops.acceptHuman(job)).accepted,false);await f.ops.controlsTick();await f.ops.monitorTick();await f.ops.deliveryTick();
   assert.deepEqual(f.ops.stats(),{ops_control_pending_count:0,ops_control_blocked_count:0,ops_alert_pending_count:0,ops_alert_blocked_count:0,
-    ops_policy_blocked_count:0,ops_delivery_pending_count:0,ops_delivery_blocked_count:0,ops_metrics:null});assert.equal(f.counts().creates,0);
+    ops_policy_blocked_count:0,ops_delivery_pending_count:0,ops_delivery_blocked_count:0,ops_metrics:null,ops_metrics_history:null,
+    ops_metrics_status:{enabled:false,status:'missing',reason:'metrics_policy_missing'},metrics_policy_blocked_count:0,research_policy_blocked_count:0,
+    collaboration_operation_pending_count:0,collaboration_operation_blocked_count:0,collaboration_policy_blocked_count:0,
+    collaboration_decision_waiting_count:0,collaboration_waiting_task_count:0});assert.equal(f.counts().creates,0);
   assert.equal(fs.existsSync(f.ops.controlRoot),false);
 });
 
@@ -161,7 +164,8 @@ test('partial health and missing background snapshots stay unknown without false
   const count=f.counts().creates;f.behavior.health={};f.open({getBackgroundTasks:()=>undefined,getBackgroundStats:()=>undefined});await f.ops.monitorTick();
   s=f.ops.monitor.stats();assert.equal(s.snapshot.background_tasks_available,false);assert.equal(s.snapshot.background_stats_available,false);
   assert.equal(s.snapshot.transport_healthy,null);assert.ok(s.monitor_active_condition_count>0);assert.equal(f.counts().creates,count);
-  const metrics=f.ops.stats().ops_metrics;assert.equal(metrics.evidence,'test_fixture');assert.equal(metrics.reply_delivery_success_rate,null);
+  const metrics=f.ops.stats().ops_metrics_history;assert.equal(metrics.evidence,'test_fixture');assert.equal(metrics.reply_delivery_success_rate,null);
+  assert.equal(f.ops.stats().ops_metrics,null);
   assert.doesNotMatch(JSON.stringify(metrics),/om_|oc_|ou_|content|private research/);
 });
 
@@ -177,5 +181,57 @@ test('policy disable preserves existing pending audits and unknown delivery capa
 test('scoped route plan recomputes trusted research routing rather than trusting external hints',t=>{
   const f=fixture(t),event=f.event('请深入研究昆士兰游船产品的市场定位和渠道策略，先提供研究报告草稿。','om_research');
   assert.equal(f.ops.routePlan(event).lane,'background');assert.equal(f.ops.routePlan(f.event('安排明天日程','om_write',{bridgeTaskRoute:{lane:'background'}})),null);
+  const job=f.inbox.enqueue(event);job.prepared={...event,nativeContext:{untrusted:'input-preparation'}};
+  assert.equal(f.ops.routePlan(job.event).lane,'background');assert.equal(f.ops.routePlan(job.prepared),null);
   f.enable({routing:false});assert.equal(f.ops.routePlan(event),null);
+});
+
+function round2Policy(f,kind,value) {
+  const file=path.join(f.stateDir,kind,f.binding.bot,'policy.json');
+  fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});atomicWriteJson(file,{schema:1,scope:opsScope(f.binding,f.codexHome),...value});return file;
+}
+test('private intake epoch is saved atomically only on first human accept; historical and synthetic jobs stay untagged',t=>{
+  const f=fixture(t),epoch={deploymentId:OPS_DEPLOYMENT_ID,versionRef:'a'.repeat(40),startedAt:Number(f.source.event.create_time)};
+  round2Policy(f,'metrics-v1',{epoch});f.open();
+  const e=f.event('查询安排','om_new'),j=f.inbox.enqueue(e,f.ops.intakeMetadata(e));
+  assert.deepEqual(j.intakeEpoch,{deploymentId:epoch.deploymentId,versionRef:epoch.versionRef});
+  assert.deepEqual(readBackgroundJson(path.join(f.inbox.dir,`job-${digest(j.id)}.json`)).intakeEpoch,j.intakeEpoch);
+  assert.equal(f.inbox.enqueue(f.source.event,f.ops.intakeMetadata(f.source.event)).intakeEpoch,undefined);
+  assert.deepEqual(f.ops.intakeMetadata(f.event('callback','om_callback',{synthetic_callback:true})),{});
+  assert.deepEqual(f.ops.intakeMetadata(f.event('foreign','om_foreign',{sender_type:'app'})),{});
+  const clean=stripExternalOpsFields({...e,intakeEpoch:{deploymentId:'forged'},metricsEpoch:epoch,finalDeliveryEvidence:{},collaboration_context:{},trustedResearchSources:{}});
+  assert.equal(clean.intakeEpoch,undefined);assert.equal(clean.finalDeliveryEvidence,undefined);assert.equal(clean.collaboration_context,undefined);
+});
+test('new epoch metrics never substitute old history, and failed epoch rebuild closes sampling and reporting',async t=>{
+  const f=fixture(t),epoch={deploymentId:OPS_DEPLOYMENT_ID,versionRef:'b'.repeat(40),startedAt:Number(f.source.event.create_time)};
+  const file=round2Policy(f,'metrics-v1',{epoch});f.open();await f.ops.monitorTick();
+  assert.equal(f.ops.stats().ops_metrics.epoch.versionRef,epoch.versionRef);assert.equal(f.ops.stats().ops_metrics.source_count,0);
+  const monitor=f.ops.monitor,requestsBefore=stableJson(monitor.state.epochs);
+  atomicWriteJson(file,{schema:1,scope:opsScope(f.binding,f.codexHome),epoch:{...epoch,versionRef:'c'.repeat(40)}});
+  const statFile=monitor.stateFile;
+  // A corrupt existing durable journal must not advertise the previous epoch as the new one.
+  fs.writeFileSync(statFile,'invalid');
+  await f.ops.monitorTick();assert.equal(f.ops.stats().ops_metrics,null);assert.equal(f.ops.stats().ops_metrics_status.enabled,false);
+  assert.equal(f.ops.stats().metrics_policy_blocked_count,1);assert.equal(stableJson(monitor.state.epochs),requestsBefore);
+});
+test('collaboration protocol uses immutable original private event and disabled policies create no claims',t=>{
+  const f=fixture(t),j=f.add('人数待补','om_context');assert.equal(f.ops.collaborationProtocol(j),null);
+  round2Policy(f,'collaboration-v1',{enabled:true});f.open();
+  const p=f.ops.collaborationProtocol(j);assert.equal(p.enabled,true);assert.equal(p.readOnly,true);
+  assert.equal(f.ops.collaborationProtocol({...j,event:{...j.event,content:'changed'}}).context.resolution.kind,'unknown');
+  assert.equal(f.ops.stats().collaboration_operation_pending_count,0);
+});
+
+test('background terminal success requires matching execution and actual result bytes, not schedule alone',async t=>{
+  const f=fixture(t),task=readBackgroundTask(f.options.backgroundRoot,f.binding,f.queued.taskId),nonce='11111111-1111-1111-1111-111111111111';
+  atomicWriteJson(path.join(f.taskDir,'claim.json'),{schema:1,taskId:task.id,nonce});
+  const run={schema:1,taskId:task.id,nonce,status:'completed',exitCode:0,resultBytes:6,resultSha256:digest(Buffer.from('answer')),
+    taskSha256:digest(fs.readFileSync(path.join(f.taskDir,'task.json'))),completedAt:Number(f.source.event.create_time)+10};
+  fs.writeFileSync(path.join(f.taskDir,'result.txt'),'answer',{mode:0o600});atomicWriteJson(path.join(f.taskDir,'run.json'),run);
+  atomicWriteJson(path.join(f.taskDir,'schedule.json'),{schema:1,taskId:task.id,requestHash:task.requestHash,status:'completed'});
+  assert.equal((await f.ops.backgroundProjection())[0].status,'completed');
+  for(const bad of [{nonce:'22222222-2222-2222-2222-222222222222'},{taskSha256:'0'.repeat(64)},{resultSha256:'0'.repeat(64)}]) {
+    atomicWriteJson(path.join(f.taskDir,'run.json'),{...run,...bad});const p=(await f.ops.backgroundProjection())[0];
+    assert.equal(p.status,'indeterminate');assert.equal(p.completedAt,undefined);assert.equal(p.resultDeliveryVerified,undefined);
+  }
 });

@@ -83,11 +83,14 @@ export class DurableInbox {
     const candidate={...j,initialFeedbackQueuedAt:this.now(),pendingProgress:{...progress,events:[progress,...prior]}};
     this.save(candidate);Object.assign(j,candidate);
   }
-  enqueue(event) {
+  enqueue(event, {intakeEpoch} = {}) {
     const id = event.message_id ?? event.id;
     if (typeof id !== 'string' || !/^om_[A-Za-z0-9_-]+$/.test(id)) throw new Error('invalid_message_id');
     if (this.jobs.has(id)) return this.jobs.get(id);
+    if(intakeEpoch!==undefined && (event.synthetic_callback===true || !intakeEpoch || Object.keys(intakeEpoch).some(k=>!['deploymentId','versionRef'].includes(k))
+      || !/^[A-Za-z0-9_-]{1,80}$/.test(intakeEpoch.deploymentId??'') || !/^[a-f0-9]{40}$/.test(intakeEpoch.versionRef??'')))throw new Error('invalid_private_intake_epoch');
     const job = { id, event, status: 'queued', acceptedAt: this.now(), attempts: 0,
+      ...(intakeEpoch?{intakeEpoch:{...intakeEpoch}}:{}),
       dispatchLane: acceptedDispatchLane(event, this.io.dependencyKey?.(event)),
       sequence: Math.max(0,...[...this.jobs.values()].map(j=>j.sequence??0))+1 };
     this.save(job); this.jobs.set(id, job);
@@ -303,10 +306,15 @@ export class DurableInbox {
         try {
           const streamKeys = [...this.jobs.values()].filter(other => other.replyKey === j.replyKey).map(other => other.streamKey).filter(Boolean);
           const peers=[...this.jobs.values()].filter(other=>other.replyKey===j.replyKey);
-          await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys, {jobId:j.id,replyKey:j.replyKey,jobs:peers});
-          atomicJson(receipt, { sentAt: this.now() });
+          const proof=await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys, {jobId:j.id,replyKey:j.replyKey,jobs:peers});
+          const evidence=proof?.schema===1 && Number.isFinite(proof.at) && proof.at>=0
+            && ['send_response','create_response','reconciled_observation'].includes(proof.source)?{schema:1,at:proof.at,source:proof.source}:null;
+          atomicJson(receipt, { sentAt: this.now(),finalDeliveryEvidence:evidence });
         } catch (error) { recordFailure(j.replyRetry, error, this.now()); atomicJson(retryFile,j.replyRetry); this.save(j); continue; }
       }
+      const sent=JSON.parse(fs.readFileSync(receipt,'utf8')),proof=sent.finalDeliveryEvidence;
+      if(proof?.schema===1 && Number.isFinite(proof.at) && proof.at>=0
+          && ['send_response','create_response','reconciled_observation'].includes(proof.source))j.finalDeliveryEvidence={schema:1,at:proof.at,source:proof.source};
       // A reply receipt deduplicates the answer, not the per-message cards.
       // Late rollout cursors discover peers after that receipt was committed.
       if(this.io.closeReplyCards && j.streamKey && j.replyCardsClosedAt===undefined) {

@@ -1202,9 +1202,12 @@ async function durableBotLoops(binding) {
         && verifyBackgroundCompletion(binding,job.prepared,backgroundRoot);
       if(job.prepared.background_completion===true && !trustedBackgroundCompletion)
         throw Object.assign(Error('background_completion_unverified'),{permanent:true});
-      const trustedTaskControl=ops?.controlProtocol(job.prepared),route=ops?.routePlan(job.prepared);
+      const trustedTaskControl=ops?.controlProtocol(job.prepared),route=ops?.routePlan(job.event);
       const trustedTaskRoute=!trustedTaskControl && route?.lane==='background'?route:null;
-      const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now,trustedBackgroundCompletion,trustedTaskControl,trustedTaskRoute});
+      const trustedCollaborationContext=!trustedBackgroundCompletion&&!trustedTaskControl?ops?.collaborationProtocol(job):null;
+      const trustedResearchSources=!trustedTaskControl?ops?.researchProtocol():null;
+      const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now,trustedBackgroundCompletion,trustedTaskControl,trustedTaskRoute,
+        trustedCollaborationContext,trustedResearchSources});
       job.readonlyPrefetchIncluded=!!verifiedReadonly(binding,job.prepared,now)?.result;
       inbox.save(job);
       if(target.pty?.transport==='managed_app_server') {
@@ -1298,7 +1301,8 @@ async function durableBotLoops(binding) {
       if (event && record.lineBytes.length<=config.runtime.max_inbound_bytes && isAuthorizedEvent(binding,event) && isFreshEvent(event)) {
         const id=event.message_id??event.id;
         if(!seenIds.includes(id)) {
-          const job=inbox.enqueue({...stripExternalOpsFields(event),bridge_binding:bindingSnapshot(binding)});
+          const clean={...stripExternalOpsFields(event),bridge_binding:bindingSnapshot(binding)};
+          const job=inbox.enqueue(clean,ops.intakeMetadata(clean));
           // Durable inbox first, then a private control receipt before advancing
           // the source cursor. The model remains an independent audit consumer.
           if(job.status!=='done')await ops.acceptHuman(job);
@@ -1334,7 +1338,7 @@ async function durableBotLoops(binding) {
     const opsStats=ops.stats();
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count
       +backgroundStats.background_queued_count+backgroundStats.background_running_count+backgroundStats.background_result_pending_count
-      +opsStats.ops_control_pending_count+opsStats.ops_alert_pending_count+opsStats.ops_delivery_pending_count;
+      +opsStats.ops_control_pending_count+opsStats.ops_alert_pending_count+opsStats.ops_delivery_pending_count+opsStats.collaboration_operation_pending_count;
     const fileStats=files.stats();
     const actionStats=actions.stats();
     const nativeStats=nativeInteractions.actions.stats();
@@ -1343,7 +1347,8 @@ async function durableBotLoops(binding) {
       voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
       state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked||backgroundStats.background_blocked_count||backgroundStats.background_admission_blocked_count
-        ||opsStats.ops_policy_blocked_count||opsStats.ops_control_blocked_count||opsStats.ops_alert_blocked_count||opsStats.ops_delivery_blocked_count?'degraded':busy?'processing':'idle',
+        ||opsStats.ops_policy_blocked_count||opsStats.ops_control_blocked_count||opsStats.ops_alert_blocked_count||opsStats.ops_delivery_blocked_count
+        ||opsStats.collaboration_operation_blocked_count||opsStats.collaboration_policy_blocked_count||opsStats.metrics_policy_blocked_count||opsStats.research_policy_blocked_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };

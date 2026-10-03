@@ -9,7 +9,7 @@ import {DurableInbox} from './codex-bridge-inbox.mjs';
 
 const base=1790852400000;
 function job(extra={}) {return {id:'om_privateMessage',event:{create_time:base,content:'客户私有正文',sender_id:'ou_privateSender'},status:'done',markerSeen:true,feedbackDisposition:'actionable',
-  acceptedAt:base+100,submittedAt:base+200,deliveredAt:base+300,completedAt:base+900,firstCardSentAt:base+400,firstCardTimingSource:'create_response',firstTypingVerifiedAt:base+350,firstTypingVerifiedTimingSource:'reconciled_observation',...extra};}
+  acceptedAt:base+100,submittedAt:base+200,deliveredAt:base+300,completedAt:base+900,finalDeliveryEvidence:{schema:1,at:base+900,source:'send_response'},firstCardSentAt:base+400,firstCardTimingSource:'create_response',firstTypingVerifiedAt:base+350,firstTypingVerifiedTimingSource:'reconciled_observation',...extra};}
 function fixture(t) {const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'perf-')));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));return root;}
 async function drain(p) {for(let i=0;i<100 && p.pending.size;i++)await delay(10);assert.equal(p.pending.size,0);}
 

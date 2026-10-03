@@ -42,6 +42,7 @@ test('fixed arguments start an isolated read-only ephemeral high task without re
   const launched=f.spawns[0];assert.equal(launched.exe,process.execPath);
   assert.deepEqual(launched.args,[f.cli,'-a','never','exec','--ignore-user-config','--sandbox','read-only','--skip-git-repo-check','--ephemeral','-m','gpt-6.1-sol','-c','model_reasoning_effort=high',
     '-c',`developer_instructions=${JSON.stringify(RESEARCH_PREFIX)}`,'-c','features.apps=false','-c','features.hooks=false','-c','features.multi_agent=false',
+    '-c','web_search="disabled"','-c','agents.enabled=false','-c','features.multi_agent_v2=false',
     '-C',f.taskDir,'-o',path.join(f.taskDir,'result.txt'),'-']);
   assert.deepEqual(launched.args,codexArguments(f.task,f.taskDir));assert.equal(launched.args.includes('resume'),false);
   assert.equal(launched.opts.cwd,f.taskDir);assert.equal(launched.opts.detached,true);assert.equal(launched.opts.shell,false);
