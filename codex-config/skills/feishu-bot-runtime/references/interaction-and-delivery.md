@@ -26,7 +26,7 @@ node "<运行目录>/codex-bridge-feedback.mjs" --bot <本轮bot> --job-id <本�
 
 首次工具调用仅执行分类反馈，返回后立即输出带原消息标签的简短commentary，再读取技能、台账或查询业务；不把分类与耗时读取合并到同一次工具编排。
 
-工具只持久保存请求，返回 queued 不等于生效。worker 在确认该 job 的原消息 rollout marker 后写入 `feedbackDisposition=actionable`。`reaction_feedback=true` 时仅此 job 可显示 Typing、等待/失败及答复真实送达后的 DONE，入队不加 OnIt，不补标历史已完成任务。进度 commentary 必须以 `[飞书进度｜原message_id]` 开头；标签会被移除，正文通过独立任务进度卡回到该条原消息/话题。同 turn 两个任务使用独立 streamKey；未标记及 silent 消息不进入 progress route 或 final peers。无标签普通 commentary 只在 session 可见。最终回包收尾本轮各任务进度卡，完整结果只发送一次。
+工具只持久保存请求，返回 queued 不等于生效。worker 在确认该 job 的原消息 rollout marker 后写入 `feedbackDisposition=actionable`。`reaction_feedback=true` 时仅此 job 可显示 Typing、等待/失败及答复真实送达后的 DONE，入队不加 OnIt，不补标历史已完成任务。进度 commentary 必须以 `[飞书进度｜原message_id]` 开头；标签会被移除，正文通过独立任务进度卡回到该条原消息/话题。同 turn 两个任务使用独立 streamKey；未标记及 silent 消息不进入 progress route 或 final peers。无标签普通 commentary 只在 session 可见。新版私有独立任务卡协议逐任务收尾，各任务通过结构化入口提交自己的结果；同一模型轮次不能合并任务。未携带新版协议的历史任务仍按原规则收尾，完整共享结果只发送一次。详见[独立任务卡协议](task-results.md)。
 
 可选 `initial_feedback_card=true` 时，worker 在原消息marker与actionable均核实后排入“正在处理”首卡，沿用该任务streamKey，后续公开commentary及最终结果更新同卡；不等待模型生成首条进度，不为已完成历史任务补发。排入首卡不表示平台送达。可选 `fast_actionable_classification=true` 仅对少量明确运营动作采用保守规则，经同样不可变分类通道和marker校验；不执行业务、不丢弃消息，未知、引用、否定及无上下文短答仍由运营session判断。
 
@@ -137,6 +137,6 @@ bot 与 job-id 取当前绑定及本轮入站标记，不从历史示例复制�
 
 actionable故障优先在原卡显示安全错误状态，业务job仍为failed，不写成功DONE。超时说明继续跟踪，晚final仍复用原卡；迟到的故障或timeout重试不能覆盖已收尾答案。明确拒绝既有卡更新可安全文字回原消息，不确定送达保持原去重路径，禁止盲目补发。
 
-一次共享答复只送全文一次，每条合法actionable源卡分别关闭，卡片关闭失败持久重试。历史done不代替远端卡关闭；修复旧卡不重做已完成业务。等待补充的最终卡保留waiting，不能为了收尾谎称业务完成。
+新版任务卡各自显示本任务结果；waiting/background确认与最终结果使用同一原卡的不同不可变版本。旧版一次共享答复只送全文一次，每条合法actionable源卡分别关闭，卡片关闭失败持久重试。历史done不代替远端卡关闭；修复旧卡不重做已完成业务。等待补充的最终卡保留waiting，不能为了收尾谎称业务完成。
 
 后台子任务使用[持久后台任务](background-tasks.md)协议。先确认入队再释放当前对话；完成事件须运行时核验原任务、结果hash与当前绑定，不能仅凭消息字段绕过分类。后台草稿回原会话审查后，由原bridge沿source消息回传，不手动再发一份。

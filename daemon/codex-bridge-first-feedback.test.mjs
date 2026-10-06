@@ -45,12 +45,12 @@ test('initial card waits for exact marker and immutable actionable, then closes 
   const f=fixture(t),j=f.add('a');await f.q.dispatchOne();enqueueActionable(f.opts('a'));
   await f.q.watch();await f.out.flushCards();assert.equal(f.calls.length,0);
   f.append(f.marker('other'));await f.q.watch();assert.equal(j.streamKey,undefined);
-  f.append(f.marker('a'));await f.q.watch();assert.equal(j.feedbackDisposition,'actionable');assert.ok(j.initialFeedbackQueuedAt);assert.equal(j.firstCardSentAt,undefined);
+  f.append({type:'turn_context',payload:{turn_id:'owner'}},f.marker('a'));await f.q.watch();assert.equal(j.feedbackDisposition,'actionable');assert.ok(j.initialFeedbackQueuedAt);assert.equal(j.firstCardSentAt,undefined);
   const key=j.streamKey;await f.out.flushCards();assert.equal(j.firstCardSentAt,10000);assert.equal(j.firstCardTimingSource,'send_response');
   assert.match(f.calls.find(a=>a[2]==='/open-apis/cardkit/v1/cards').at(-1),/正在处理/);
   f.advance(3000);f.append({type:'turn_context',payload:{turn_id:'later'}},f.msg('[飞书进度｜om_a] 已查询日程'));
   await f.q.watch();assert.equal(j.streamKey,key);await f.out.flushCards();
-  f.open();f.append(f.msg('查询结果','final_answer'));await f.q.watch();await f.q.deliverReplies();
+  f.open();f.append({type:'turn_context',payload:{turn_id:'owner'}},f.msg('查询结果','final_answer'));await f.q.watch();await f.q.deliverReplies();
   const saved=f.q.jobs.get(j.id),card=f.out.read(f.out.file('card',key));assert.equal(saved.status,'done');assert.equal(saved.streamKey,key);assert.equal(saved.firstCardSentAt,10000);assert.equal(card.finalDelivered,true);
   assert.equal(f.calls.filter(a=>a[1]==='POST'&&a[2]==='/open-apis/im/v1/messages').length,1);
 });

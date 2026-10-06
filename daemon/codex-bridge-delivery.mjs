@@ -7,20 +7,34 @@ import { replyRouteNotice } from './codex-bridge-reply-routing.mjs';
 
 // One integration owner calls this outside the outbound serial lane: file
 // sends use that same lane and must finish before the final-card operation.
-export function createReplyDelivery({ binding, actions, outbound, files, reportOptions, cloudDocs, nativeInteractions, getRoute, log=()=>{} }) {
+export function createReplyDelivery({ binding, actions, outbound, files, reportOptions, cloudDocs, nativeInteractions, getRoute, taskResults, log=()=>{} }) {
   const unavailable=(name,jobId)=>{try{log(name,{bot:binding.bot,jobId});}catch{/* Feedback must not block the answer. */}};
+  const verifyTask=(context,replyKey,value)=>{
+    if(!context.taskResult)return null;
+    const job=authorizedFileJob(reportOptions.inboxRoot,binding,context.jobId,replyKey);
+    const result=taskResults?.get(job),expected=context.taskResult;
+    if(!result || result.ownerJobId!==job.id || result.replyKey!==replyKey || result.text!==value
+        || ['status','resultKey','revision','ownerJobId','updateKind'].some(key=>result[key]!==expected[key]))
+      throw Object.assign(Error('task_result_delivery_mismatch'),{permanent:true});
+    return result;
+  };
   const deliver=async (value, replyKey, streamKeys=[], context={}) => {
     if(context.jobId){
       const origin=authorizedFileJob(reportOptions.inboxRoot,binding,context.jobId,replyKey);
       if(!isBoundJob(binding,origin))throw Object.assign(Error('reply_binding_changed'),{permanent:true});
     }
+    const taskResult=verifyTask(context,replyKey,value);
     // Card-only reconciliation must bypass reports, uploads and action setup.
     if(outbound.replyDelivered?.(replyKey)) {
       await deliver.closeCards(replyKey,streamKeys,context);return outbound.replyDeliveryEvidence?.(replyKey)??null;
     }
     const clean=sanitizeFeishuReply(value).trim();
     const ux=parseReplyUx(clean);
-    const presentation={status:ux.status};
+    if(taskResult && ux.form && taskResult.status!=='waiting')throw Object.assign(Error('task_result_form_status_mismatch'),{permanent:true});
+    const presentation={status:taskResult?({complete:'complete',failed:'error',waiting:'waiting',background:'working'}[taskResult.status]):ux.status,
+      ...(taskResult?{taskTitle:taskResult.title,taskResult:{schema:1,ownerJobId:taskResult.ownerJobId,revision:taskResult.revision,
+        resultKey:taskResult.resultKey,status:taskResult.status,...(taskResult.updateKind?{updateKind:taskResult.updateKind}:{})}}:{})};
+    const actionableResult=!taskResult || ['complete','waiting'].includes(taskResult.status);
     if(getRoute){
       try{
         const route=await getRoute(context);
@@ -35,7 +49,7 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
       presentation.fallbackText=ux.text+'\n\n请一次回复以下条件：\n'+ux.form.fields.map(f=>
         `- ${f.label}${f.required?'（必填）':'（可选）'}${f.options ? `：${f.options.map(o=>o.label).join('／')}` : ''}`).join('\n');
     }
-    if (context.jobId && ux.status === 'complete') {
+    if (context.jobId && ux.status === 'complete' && (!taskResult || taskResult.status==='complete')) {
       try {
         const report=prepareReplyReport({...reportOptions,binding,jobId:context.jobId,replyKey,text:clean});
         if(report.generated){
@@ -61,13 +75,15 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
     }
     if(actions && context.jobId && binding.interactions_enabled!==false){
       try {
-        const descriptor=actions.registerContext({key:replyKey,sourceJobId:context.jobId,codexThreadId:binding.codex_thread_id,
-          chatId:binding.chat_id,allowedSenderId:binding.allowed_sender_id,answer:ux.text,mode:ux.status,form:ux.form});
+        const descriptor=actions.registerContext({key:taskResult?`task:${taskResult.ownerJobId}`:replyKey,version:taskResult?.revision??1,
+          sourceJobId:context.jobId,codexThreadId:binding.codex_thread_id,
+          chatId:binding.chat_id,allowedSenderId:binding.allowed_sender_id,answer:ux.text,
+          mode:taskResult&&taskResult.status!=='complete'?'waiting':ux.status,form:ux.form});
         const elements=buildActionElements(descriptor,{includeForm:ux.status==='waiting'});
-        presentation.actionContext=descriptor.contextId;presentation.interactions=elements;
+        presentation.actionContext=descriptor.contextId;presentation.interactions=actionableResult?elements:[];
       } catch { unavailable('reply_actions_unavailable',context.jobId); }
     }
-    if(nativeInteractions && context.jobId && ux.status==='complete' && binding.interactions_enabled!==false){
+    if(nativeInteractions && context.jobId && ux.status==='complete' && (!taskResult || taskResult.status==='complete') && binding.interactions_enabled!==false){
       try{
         const native=await nativeInteractions.taskButton({jobId:context.jobId,replyKey,text:ux.text});
         if(native){
@@ -81,6 +97,14 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
     return outbound.final(ux.form && !presentation.actionContext ? presentation.fallbackText : ux.text,replyKey,streamKeys,presentation);
   };
   deliver.closeCards=async (replyKey,streamKeys=[],context={})=>{
+    if(context.taskResult) {
+      // Task revisions are already closed by their own confirmed card update.
+      // A generic shared-answer close would overwrite the task-specific text.
+      const job=authorizedFileJob(reportOptions.inboxRoot,binding,context.jobId,replyKey);
+      verifyTask(context,replyKey,job.reply??context.taskResult.text);
+      if(!outbound.replyDelivered(replyKey))throw Object.assign(Error('task_result_card_unconfirmed'),{permanent:true});
+      return;
+    }
     const keys=[];
     for(const peer of context.jobs??[]) {
       const job=authorizedFileJob(reportOptions.inboxRoot,binding,peer.id,replyKey);

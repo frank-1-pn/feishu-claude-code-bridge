@@ -13,6 +13,8 @@ export function streamCard(text, final, options = {}) {
   const answerElements=markdownElements(view.answer,'answer');
   answerElements[0].element_id='answer';
   const elements = [{tag:'markdown',element_id:'status',content:`**${view.status}**`},...answerElements];
+  if(typeof options.taskTitle==='string' && options.taskTitle.trim())elements.splice(1,0,
+    {tag:'markdown',element_id:'task_title',content:String(options.taskTitle).replace(/[\\`*_{}\[\]()<>#|]/g,'').slice(0,200)});
   if(options.replyNotice)elements.push({tag:'markdown',element_id:'reply_notice',content:String(options.replyNotice)});
   const cloudUrl=options.cloudDoc?.status==='ready'?safeHttpUrl(options.cloudDoc.url):null;
   if(cloudUrl)elements.push({tag:'markdown',element_id:'cloud_doc',content:`[打开飞书云文档](${cloudUrl})`});
@@ -30,7 +32,7 @@ export function streamCard(text, final, options = {}) {
   if(final && Array.isArray(options.interactions)) elements.push(...options.interactions);
   return { schema:'2.0', config:{update_multi:true,streaming_mode:streaming,width_mode:'fill',summary:{content:view.summary},enable_forward_interaction:false,
     ...(streaming ? {streaming_config:{print_frequency_ms:{default:70},print_step:{default:3},print_strategy:'fast'}} : {})},
-    header:{template:view.state==='error'?'red':view.state==='waiting'?'orange':final?'green':'blue',title:{tag:'plain_text',content:view.status}},
+    header:{template:view.state==='error'?'red':view.state==='waiting'?'orange':view.state==='complete'&&final?'green':'blue',title:{tag:'plain_text',content:view.status}},
     body:{elements} };
 }
 

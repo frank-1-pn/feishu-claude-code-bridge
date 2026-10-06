@@ -191,6 +191,7 @@ export class DurableOutbound {
     atomicWriteJson(file, latest);
   }
   async final(text, replyKey, streamKeys = [], presentation) {
+    if(presentation?.taskResult)return this.taskFinal(text,replyKey,streamKeys,presentation);
     const clean = sanitizeFeishuReply(text).trim() || '本次没有可发送的正文。';
     const replyFile=this.file('reply',replyKey);
     if(this.replyDelivered(replyKey)) {
@@ -252,6 +253,77 @@ export class DurableOutbound {
     if (!delivered) await this.text(presentation?.fallbackText??clean, replyKey,route);
     const evidence=this.replyDeliveryEvidence(replyKey);
     atomicWriteJson(replyFile,{deliveredAt:this.now(),status:presentation?.status??'complete',finalDeliveryEvidence:evidence});return evidence;
+  }
+  // The model turn is not a business task. Structured task results own one
+  // existing card, and each confirmed revision keeps its own immutable receipt.
+  async taskFinal(text,replyKey,streamKeys,presentation) {
+    const task=presentation.taskResult,keys=[...new Set(streamKeys)];
+    const fail=code=>{throw Object.assign(Error(code),{permanent:true});};
+    if(task.schema!==1 || !/^om_[A-Za-z0-9_-]+$/.test(task.ownerJobId??'')
+        || !Number.isSafeInteger(task.revision) || task.revision<1 || typeof task.resultKey!=='string'
+        || !['complete','waiting','failed','background'].includes(task.status)
+        || task.updateKind!==undefined && task.updateKind!=='answer_revision' || keys.length!==1)
+      fail('invalid_task_card_result');
+    const clean=sanitizeFeishuReply(text).trim();if(!clean)fail('empty_task_card_result');
+    return this.serial(async()=>{
+      const file=this.file('card',keys[0]),s=this.read(file,{key:keys[0],revision:0,jobId:task.ownerJobId,...(presentation.replyRoute?{route:presentation.replyRoute}:{})});
+      if(s.jobId && s.jobId!==task.ownerJobId)fail('task_card_owner_changed');
+      if(s.taskResult && s.taskResult.ownerJobId!==task.ownerJobId)fail('task_card_owner_changed');
+      const delivered=this.replyDelivered(replyKey),prior=s.taskResult;
+      if(prior && task.revision<prior.revision) {
+        if(delivered)return this.replyDeliveryEvidence(replyKey);
+        fail('task_card_revision_stale');
+      }
+      if(prior && task.revision===prior.revision && (s.finalReplyKey!==replyKey || prior.resultKey!==task.resultKey
+          || prior.status!==task.status || prior.updateKind!==task.updateKind || s.text!==clean))fail('task_card_result_changed');
+      if(delivered)return this.replyDeliveryEvidence(replyKey);
+      const same=prior?.revision===task.revision;
+      if(!same) {
+        if(prior) {
+          if(task.revision!==prior.revision+1 || (!['waiting','background'].includes(prior.status)
+              && !(prior.status==='complete' && task.updateKind==='answer_revision'))
+              || !this.replyDelivered(s.finalReplyKey))fail('task_card_prior_unconfirmed');
+        } else if(task.revision!==1 || s.finalReplyKey || s.finalDelivered || s.finalClosedReplyKey)
+          fail('task_card_legacy_or_revision_changed');
+        // Never let the preceding answer's proof acknowledge a new snapshot.
+        for(const field of ['finalDelivered','finalDeliveryEvidence','finalClosedReplyKey','finalClosedAt','finalCardFailed',
+          'blocked','retryAt','attempts','noticeKey','noticeCardFailed'])delete s[field];
+        s.revision++;
+      }
+      if(s.blocked)throw Object.assign(Error('task_card_delivery_unconfirmed'),{permanent:true,deliveryUncertain:Boolean(s.deliveryUncertain)});
+      s.jobId=task.ownerJobId;s.final=true;s.finalReplyKey=replyKey;s.taskResult={...task};s.text=clean;
+      // A later business revision must not retain a former form, report link
+      // or action context. Only this task's public progress history persists.
+      s.presentation={...(s.presentation?.publicProgress?{publicProgress:s.presentation.publicProgress}:{}),
+        ...(s.presentation?.taskTitle?{taskTitle:s.presentation.taskTitle}:{}),...presentation,taskResult:{...task}};
+      atomicWriteJson(file,s);
+      try {await this.updateCard(file,s,true);}
+      catch(error) {
+        const latest=this.read(file);recordFailure(latest,error,this.now());latest.finalCardFailed=true;
+        if(error.deliveryUncertain)latest.deliveryUncertain=true;
+        atomicWriteJson(file,latest);throw error;
+      }
+      const latest=this.read(file),proof=latest.lastAppliedEvidence;
+      const evidence=proof?.revision===s.revision?{schema:1,at:proof.at,source:proof.source}
+        :{schema:1,at:this.now(),source:'reconciled_observation'};
+      latest.finalDelivered=true;latest.finalDeliveryEvidence=evidence;
+      latest.finalClosedReplyKey=replyKey;latest.finalClosedAt=this.now();atomicWriteJson(file,latest);
+      atomicWriteJson(this.file('reply',replyKey),{deliveredAt:this.now(),status:presentation.status??'complete',finalDeliveryEvidence:evidence});
+      return evidence;
+    });
+  }
+  async linkTaskCard(sourceKey,ownerKey,{jobId}={}) {
+    if(!sourceKey || sourceKey===ownerKey)return;
+    return this.serial(async()=>{
+      const file=this.file('card',sourceKey),s=this.read(file);
+      if(!s)return; // No extra card is created for a supplemental message.
+      if(s.jobId!==jobId || s.taskResult || s.finalReplyKey)throw Object.assign(Error('task_link_card_changed'),{permanent:true});
+      if(s.linkedTaskKey===ownerKey && s.sentRevision===s.revision)return;
+      if(s.linkedTaskKey && s.linkedTaskKey!==ownerKey)throw Object.assign(Error('task_link_owner_changed'),{permanent:true});
+      if(!s.linkedTaskKey){s.linkedTaskKey=ownerKey;s.final=true;s.text='补充已关联到原任务，后续进度和结果请查看原任务卡。';
+        s.presentation={...s.presentation,status:'waiting',interactions:[]};delete s.presentation.actionContext;delete s.presentation.nativeContext;s.revision++;atomicWriteJson(file,s);}
+      await this.updateCard(file,s,true);
+    });
   }
 
   replyDeliveryEvidence(replyKey) {

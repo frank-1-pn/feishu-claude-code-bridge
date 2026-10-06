@@ -22,6 +22,10 @@ const eventTime = (item, now) => {
   const value = typeof item.timestamp === 'string' ? Date.parse(item.timestamp) : NaN;
   return Number.isFinite(value) && value >= 0 && value <= now ? value : null;
 };
+const perTaskResult = job => job?.taskResultProtocolVersion === 1;
+const deliveryEvidence = proof => proof?.schema===1 && Number.isFinite(proof.at) && proof.at>=0
+  && ['send_response','create_response','reconciled_observation'].includes(proof.source)
+  ? {schema:1,at:proof.at,source:proof.source} : null;
 
 export function normalizeEvent(event) {
   const type = event.message_type;
@@ -71,12 +75,13 @@ export class DurableInbox {
   progressKey(j) {
     // Once published, the key belongs to this exact message for its lifetime.
     // A later turn_context must not detach the final from its initial card.
-    if(this.io.classifiedFeedback && this.io.initialFeedbackCard && j.streamKey)return j.streamKey;
-    return digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}${this.io.classifiedFeedback?'\0'+j.id:''}`);
+    if((perTaskResult(j) || this.io.classifiedFeedback && this.io.initialFeedbackCard) && j.streamKey)return j.streamKey;
+    return digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}${perTaskResult(j) || this.io.classifiedFeedback?'\0'+j.id:''}`);
   }
   queueInitialFeedback(j) {
     if(!this.io.initialFeedbackCard || !this.io.classifiedFeedback || !j.markerSeen || j.feedbackDisposition!=='actionable'
-        || j.event?.synthetic_callback || j.initialFeedbackQueuedAt!==undefined || !['submitted','delivered'].includes(j.status) || j.unclassifiedTurnEnded)return;
+        || j.event?.synthetic_callback || j.taskResultOwnerJobId && j.taskResultOwnerJobId!==j.id
+        || j.initialFeedbackQueuedAt!==undefined || !['submitted','delivered'].includes(j.status) || j.unclassifiedTurnEnded)return;
     j.streamKey=this.progressKey(j);
     const progress={text:'正在处理…',key:j.streamKey,at:null,observedAt:this.now(),initialFeedback:true};
     const prior=j.pendingProgress?.events??(j.pendingProgress?[j.pendingProgress]:[]);
@@ -90,6 +95,8 @@ export class DurableInbox {
     if(intakeEpoch!==undefined && (event.synthetic_callback===true || !intakeEpoch || Object.keys(intakeEpoch).some(k=>!['deploymentId','versionRef'].includes(k))
       || !/^[A-Za-z0-9_-]{1,80}$/.test(intakeEpoch.deploymentId??'') || !/^[a-f0-9]{40}$/.test(intakeEpoch.versionRef??'')))throw new Error('invalid_private_intake_epoch');
     const job = { id, event, status: 'queued', acceptedAt: this.now(), attempts: 0,
+      ...((typeof this.io.perTaskResults==='function'?this.io.perTaskResults(event):this.io.perTaskResults===true)
+        ?{taskResultProtocolVersion:1,...(this.io.taskResultScope?{taskResultProtocolScope:{cwd:this.io.taskResultScope.cwd,codexHome:this.io.taskResultScope.codexHome}}:{})}:{}),
       ...(intakeEpoch?{intakeEpoch:{...intakeEpoch}}:{}),
       dispatchLane: acceptedDispatchLane(event, this.io.dependencyKey?.(event)),
       sequence: Math.max(0,...[...this.jobs.values()].map(j=>j.sequence??0))+1 };
@@ -161,6 +168,7 @@ export class DurableInbox {
       const candidate={...j,feedbackDisposition:'actionable',feedbackAcceptedAt:this.now()};this.save(candidate);Object.assign(j,candidate);
       this.io.onActionable?.(j);
     }
+    if(perTaskResult(j))this.refreshTaskResult(j);
     this.queueInitialFeedback(j);
     if(disposition!=='silent' && !this.io.silentCompletion?.(j))return false;
     const candidate={...j,status:'done',completedAt:this.now(),completionDisposition:'silent',feedbackDisposition:'silent'};
@@ -169,8 +177,55 @@ export class DurableInbox {
     for(const key of Object.keys(j))if(!(key in candidate))delete j[key];
     Object.assign(j,candidate);this.io.log?.('inbox_silent_completed',{bot:this.bot,messageId:j.id});return true;
   }
+  refreshTaskResult(j) {
+    if(!perTaskResult(j) || !j.markerSeen || j.completionDisposition==='silent' || !this.io.taskResults?.get)return;
+    if(!j.event?.synthetic_callback && j.feedbackDisposition!=='actionable')return;
+    let result;
+    try { result=this.io.taskResults.get(j); }
+    catch {
+      // Protocol failures are private diagnostics, never a business retry or
+      // an invitation to publish the turn's unscoped final answer.
+      if(j.taskResultReadError!=='task_result_read_failed'){j.taskResultReadError='task_result_read_failed';this.save(j);}
+      return;
+    }
+    if(j.taskResultReadError){delete j.taskResultReadError;this.save(j);}
+    if(!result)return;
+    if(result.linked && result.ownerJobId!==j.id) {
+      const owner=this.jobs.get(result.ownerJobId);
+      if(!owner || !perTaskResult(owner) || result.sourceJobId!==j.id
+          || j.taskResultOwnerJobId && j.taskResultOwnerJobId!==owner.id)return;
+      // An explicit verified supplement/callback is an audit source, not an
+      // additional result recipient. Keep its actionable classification.
+      if(j.taskResultOwnerJobId!==owner.id) {
+        j.taskResultOwnerJobId=owner.id;
+        delete j.pendingProgress;this.save(j);
+      }
+      return;
+    }
+    if(result.ownerJobId!==j.id || !['complete','failed','waiting','background'].includes(result.status)
+        || typeof result.text!=='string' || !result.text.trim() || !/^[a-f0-9]{64}$/.test(result.replyKey??'')
+        || !Number.isInteger(result.revision) || result.revision<1)return;
+    if(j.taskResult?.replyKey===result.replyKey)return;
+    // A durable pending delivery is never overwritten by a later revision.
+    if(j.status==='reply_pending' || j.taskResultPending)return;
+    // Background verification must continue to see the original acknowledged
+    // transport job as done while its explicit completion revision is sent.
+    const candidate={...j,status:j.status==='done'?'done':'reply_pending',taskResultPending:true,reply:result.text,replyKey:result.replyKey,
+      streamKey:this.progressKey(j),taskResult:{...result},taskResultOwnerJobId:j.id,
+      ...(j.taskResult?.replyKey?{taskResultPreviousReplyKey:j.taskResult.replyKey}:{})};
+    for(const key of ['completedAt','replyRetry','replyCardRetry','replyCardsClosedAt','finalDeliveryEvidence',
+      'taskResultProtocolBlocked','taskResultProtocolBlockedAt','taskResultReadError'])delete candidate[key];
+    if(candidate.timeoutNotice && candidate.notice===candidate.timeoutNotice){delete candidate.notice;delete candidate.noticeRetry;}
+    this.save(candidate);for(const key of Object.keys(j))if(!(key in candidate))delete j[key];Object.assign(j,candidate);
+  }
   scan(j) {
     if(j.unclassifiedTurnEnded)return [];
+    // Upgrade only unresolved legacy marker ownership, before observing any
+    // later turn. The current rollout context is not the task's owner.
+    if(j.markerSeen && j.markerTurnId===undefined && j.turnId!==undefined) {
+      j.markerTurnId=j.turnId;this.save(j);
+    }
+    let observedTurnId=j.observedTurnId??j.turnId;
     const stat = fs.statSync(j.rollout, { throwIfNoEntry: false });
     if (!stat || stat.size < j.cursor) throw new Error('rollout_missing_or_truncated');
     if (stat.size === j.cursor) return [];
@@ -193,11 +248,14 @@ export class DurableInbox {
       pos = end+1;
       const p = item.payload;
       if ((item.type === 'turn_context' || (item.type === 'event_msg' && p?.type === 'task_started')) && p?.turn_id) {
-        j.turnId = p.turn_id;
+        observedTurnId=p.turn_id;j.observedTurnId=observedTurnId;
+        if(!j.markerSeen)j.turnId=observedTurnId;
       }
       if (item.type === 'response_item' && p?.type === 'message' && p.role === 'user'
           && JSON.stringify(p.content ?? []).includes(`[飞书消息｜${this.bot}｜${j.id}]`)) {
         j.markerSeen = true; j.status = 'delivered'; j.deliveredAt ??= this.now();
+        if(j.markerTurnId===undefined && observedTurnId!==undefined)j.markerTurnId=observedTurnId;
+        if(perTaskResult(j))this.save(j); // The independent store reads durable marker proof.
       }
       if (!j.markerSeen) continue;
       if(this.completeSilently(j))break;
@@ -212,8 +270,9 @@ export class DurableInbox {
         }
       }
       if (message?.phase === 'commentary') {
+        if(perTaskResult(j) && (j.taskResultOwnerJobId && j.taskResultOwnerJobId!==j.id || j.taskResult))continue;
         let text=message.text;
-        if(this.io.classifiedFeedback && !j.event?.synthetic_callback) {
+        if((perTaskResult(j) || this.io.classifiedFeedback) && !j.event?.synthetic_callback) {
           const tagged=/^\s*\[飞书进度｜(om_[A-Za-z0-9_-]+)\]\s*([^]*)$/.exec(text);
           if(j.feedbackDisposition!=='actionable' || tagged?.[1]!==j.id)continue;
           text=tagged[2];
@@ -224,6 +283,13 @@ export class DurableInbox {
         j.pendingProgress={...progress,events:[...prior,progress].slice(-12)};
       }
       const completion = rolloutTaskCompletion(item);
+      if((message?.phase==='final_answer' || completion) && observedTurnId!==j.markerTurnId)continue;
+      if(perTaskResult(j) && (message?.phase==='final_answer' || completion)) {
+        if(!j.taskResult && !(j.taskResultOwnerJobId && j.taskResultOwnerJobId!==j.id)) {
+          j.taskResultProtocolBlocked='turn_ended_without_task_result';j.taskResultProtocolBlockedAt??=this.now();
+        }
+        continue;
+      }
       if (message?.phase === 'final_answer' || completion?.kind === 'final') {
         if(this.io.classifiedFeedback && !j.event?.synthetic_callback && j.feedbackDisposition!=='actionable') {j.unclassifiedTurnEnded=true;break;}
         j.status = 'reply_pending'; j.reply = message?.text ?? completion.text;
@@ -243,11 +309,13 @@ export class DurableInbox {
   }
   async watch() {
     for (const j of this.jobs.values()) {
+      if(perTaskResult(j))this.refreshTaskResult(j);
       if (!['submitted','delivered'].includes(j.status)) continue;
       try {
         if(!this.completeSilently(j))this.scan(j);
         if(j.error==='rollout_read_failed'){delete j.error;this.save(j);}
       } catch { j.error = 'rollout_read_failed'; this.save(j); }
+      if(perTaskResult(j))this.refreshTaskResult(j);
       // Timed-out jobs remain watched; late delivery/final may still arrive.
       const activityAt=j.markerSeen?(j.lastActivityAt??j.submittedAt):j.submittedAt;
       const caughtUp=fs.statSync(j.rollout,{throwIfNoEntry:false})?.size===j.cursor;
@@ -260,6 +328,9 @@ export class DurableInbox {
     }
     for (const j of this.jobs.values()) {
       if (!j.pendingProgress) continue;
+      if(perTaskResult(j) && (j.taskResult || j.taskResultOwnerJobId && j.taskResultOwnerJobId!==j.id)) {
+        delete j.pendingProgress;this.save(j);continue;
+      }
       try {
         for(const progress of j.pendingProgress.events??[j.pendingProgress])
           await this.io.progress?.(progress.text,progress.key,{jobId:j.id,job:j,at:progress.at,observedAt:progress.observedAt,position:progress.position,initialFeedback:progress.initialFeedback});
@@ -268,6 +339,7 @@ export class DurableInbox {
     }
   }
   async deliverReplies() {
+    for(const j of this.jobs.values())if(perTaskResult(j))this.refreshTaskResult(j);
     for (const j of this.jobs.values()) {
       if(j.notice && this.io.suppressNotices?.(j)) {
         j.noticeSuppressed=true;delete j.notice;delete j.noticeRetry;this.save(j);
@@ -291,28 +363,36 @@ export class DurableInbox {
       // Upgrade recovery: older versions marked late peers done as soon as
       // the shared answer receipt existed, leaving their visible cards open.
       const recoverCard=j.status==='done' && this.io.closeReplyCards && j.markerSeen && j.streamKey && j.replyKey
+        && !j.taskResultPending
+        && (!perTaskResult(j) || j.taskResultOwnerJobId===j.id)
         && j.replyCardsClosedAt===undefined && j.completionDisposition!=='silent' && !j.unclassifiedTurnEnded
         && (!this.io.classifiedFeedback || j.event?.synthetic_callback || j.feedbackDisposition==='actionable');
-      if (j.status !== 'reply_pending' && !recoverCard) continue;
+      if (j.status !== 'reply_pending' && !j.taskResultPending && !recoverCard) continue;
       const receipt = path.join(this.dir, `sent-${j.replyKey}.json`);
       if(recoverCard) {
         if(!fs.existsSync(receipt))continue; // Never replay an old business answer.
-        j.status='reply_pending';delete j.completedAt;this.save(j);
+        if(perTaskResult(j))j.taskResultPending=true;
+        else j.status='reply_pending';
+        delete j.completedAt;this.save(j);
       }
       if (!fs.existsSync(receipt)) {
         const retryFile = path.join(this.dir, `reply-retry-${j.replyKey}.json`);
         j.replyRetry = fs.existsSync(retryFile) ? JSON.parse(fs.readFileSync(retryFile, 'utf8')) : (j.replyRetry ?? {});
         if (j.replyRetry.blocked || (j.replyRetry.retryAt ?? 0) > this.now()) continue;
         try {
-          const streamKeys = [...this.jobs.values()].filter(other => other.replyKey === j.replyKey).map(other => other.streamKey).filter(Boolean);
-          const peers=[...this.jobs.values()].filter(other=>other.replyKey===j.replyKey);
-          const proof=await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys, {jobId:j.id,replyKey:j.replyKey,jobs:peers});
-          const evidence=proof?.schema===1 && Number.isFinite(proof.at) && proof.at>=0
-            && ['send_response','create_response','reconciled_observation'].includes(proof.source)?{schema:1,at:proof.at,source:proof.source}:null;
+          const peers=perTaskResult(j)?[j]:[...this.jobs.values()].filter(other=>!perTaskResult(other) && other.replyKey===j.replyKey);
+          const streamKeys=peers.map(other=>other.streamKey).filter(Boolean);
+          const proof=await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys,
+            {jobId:j.id,replyKey:j.replyKey,jobs:peers,...(perTaskResult(j)?{taskResult:j.taskResult}:{})});
+          const evidence=deliveryEvidence(proof);
+          if(perTaskResult(j) && !evidence)throw Error('task_result_delivery_proof_missing');
           atomicJson(receipt, { sentAt: this.now(),finalDeliveryEvidence:evidence });
         } catch (error) { recordFailure(j.replyRetry, error, this.now()); atomicJson(retryFile,j.replyRetry); this.save(j); continue; }
       }
       const sent=JSON.parse(fs.readFileSync(receipt,'utf8')),proof=sent.finalDeliveryEvidence;
+      if(perTaskResult(j) && !deliveryEvidence(proof)) {
+        j.taskResultReadError='task_result_delivery_proof_missing';this.save(j);continue;
+      }
       if(proof?.schema===1 && Number.isFinite(proof.at) && proof.at>=0
           && ['send_response','create_response','reconciled_observation'].includes(proof.source))j.finalDeliveryEvidence={schema:1,at:proof.at,source:proof.source};
       // A reply receipt deduplicates the answer, not the per-message cards.
@@ -321,22 +401,52 @@ export class DurableInbox {
         j.replyCardRetry??={};
         if(j.replyCardRetry.blocked || (j.replyCardRetry.retryAt??0)>this.now())continue;
         try {
-          await this.io.closeReplyCards(j.replyKey,[j.streamKey],{jobId:j.id,replyKey:j.replyKey,jobs:[j]});
+          await this.io.closeReplyCards(j.replyKey,[j.streamKey],{jobId:j.id,replyKey:j.replyKey,jobs:[j],
+            ...(perTaskResult(j)?{taskResult:j.taskResult}:{})});
           j.replyCardsClosedAt=this.now();delete j.replyCardRetry;
         } catch(error) {recordFailure(j.replyCardRetry,error,this.now());this.save(j);continue;}
       }
       j.status = 'done'; j.completedAt = this.now(); delete j.reply; delete j.replyRetry;
+      delete j.taskResultPending;
+      if(perTaskResult(j))j.taskBusinessStatus=j.taskResult.status;
       this.save(j); this.io.log?.('inbox_reply_sent', { bot: this.bot, messageId: j.id });
+    }
+    await this.reconcileLinkedTaskResults();
+  }
+  async reconcileLinkedTaskResults() {
+    for(const j of this.jobs.values()) {
+      if(!perTaskResult(j) || !j.markerSeen || !j.taskResultOwnerJobId || j.taskResultOwnerJobId===j.id)continue;
+      const owner=this.jobs.get(j.taskResultOwnerJobId);
+      if(!owner?.taskResult || owner.status!=='done' || owner.taskResultPending
+          || (owner.taskResult.resultSourceJobId??owner.taskResult.sourceJobId)!==j.id)continue;
+      const receipt=path.join(this.dir,`sent-${owner.taskResult.replyKey}.json`);
+      if(!fs.existsSync(receipt))continue;
+      const proof=deliveryEvidence(JSON.parse(fs.readFileSync(receipt,'utf8')).finalDeliveryEvidence);
+      if(!proof)continue;
+      if(j.streamKey && j.linkedTaskCardClosedAt===undefined && this.io.closeLinkedTaskCard) {
+        j.linkedTaskCardRetry??={};
+        if(j.linkedTaskCardRetry.blocked || (j.linkedTaskCardRetry.retryAt??0)>this.now())continue;
+        try {await this.io.closeLinkedTaskCard(j.streamKey,{jobId:j.id,ownerJobId:owner.id,taskResult:owner.taskResult});}
+        catch(error) {recordFailure(j.linkedTaskCardRetry,error,this.now());this.save(j);continue;}
+        j.linkedTaskCardClosedAt=this.now();delete j.linkedTaskCardRetry;
+      }
+      if(j.taskResultLinkedReplyKey===owner.taskResult.replyKey && j.status==='done')continue;
+      j.status='done';j.completedAt=this.now();j.taskBusinessStatus=owner.taskBusinessStatus;
+      j.taskResultLinkedReplyKey=owner.taskResult.replyKey;j.taskResultLinkedDeliveryEvidence=proof;
+      delete j.pendingProgress;this.save(j);
     }
   }
   stats() {
     const all = [...this.jobs.values()];
     const count = (s) => all.filter(j => s.includes(j.status)).length;
     return { queued_count: count(['queued']), awaiting_delivery_count: count(['submitted']),
-      awaiting_reply_count: count(['delivered']), reply_pending_count: count(['reply_pending']),
-      failed_count: count(['failed']), completed_count: count(['done']), silent_completed_count:all.filter(j=>j.status==='done' && j.completionDisposition==='silent').length, actionable_count:all.filter(j=>j.feedbackDisposition==='actionable').length, waiting_input_count: count(['waiting_input']),
+      awaiting_reply_count: count(['delivered']), reply_pending_count: all.filter(j=>j.status==='reply_pending' || j.taskResultPending).length,
+      failed_count: count(['failed']), completed_count: all.filter(j=>j.status==='done' && !j.taskResultPending).length, silent_completed_count:all.filter(j=>j.status==='done' && j.completionDisposition==='silent').length, actionable_count:all.filter(j=>j.feedbackDisposition==='actionable').length, waiting_input_count: count(['waiting_input']),
+      task_result_protocol_blocked_count:all.filter(j=>perTaskResult(j) && (j.taskResultProtocolBlocked || j.taskResultReadError)).length,
+      task_result_waiting_count:all.filter(j=>perTaskResult(j) && j.taskResultOwnerJobId===j.id && j.taskBusinessStatus==='waiting').length,
+      task_result_background_count:all.filter(j=>perTaskResult(j) && j.taskResultOwnerJobId===j.id && j.taskBusinessStatus==='background').length,
       watch_error_count: all.filter(j=>j.error==='rollout_read_failed').length,
-      outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.replyCardRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
+      outbound_blocked_count: all.filter(j => j.replyRetry?.blocked || j.replyCardRetry?.blocked || j.linkedTaskCardRetry?.blocked || j.noticeRetry?.blocked || j.receiptRetry?.blocked).length,
       oldest_queued_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'queued').map(j => (this.now()-j.acceptedAt)/1000))),
       oldest_pending_seconds: Math.round(Math.max(0, ...all.filter(j => j.status !== 'done' && j.status !== 'failed').map(j => (this.now()-j.acceptedAt)/1000))),
       oldest_undelivered_seconds: Math.round(Math.max(0, ...all.filter(j => j.status === 'submitted').map(j => (this.now()-j.submittedAt)/1000))),

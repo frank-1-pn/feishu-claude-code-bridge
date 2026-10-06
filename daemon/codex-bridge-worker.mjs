@@ -54,6 +54,7 @@ import {prepareReadonlyInput,readonlyEligible,validateReadonlyConfig,verifiedRea
 import {DeferredPerformance} from './codex-bridge-performance.mjs';
 import {WakeSignal,EventFileWakeup} from './codex-bridge-wakeup.mjs';
 import {createOpsRuntime,stripExternalOpsFields} from './codex-bridge-ops-runtime.mjs';
+import {TaskResultStore} from './codex-bridge-task-results.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -1168,12 +1169,23 @@ async function durableBotLoops(binding) {
     }});
   const files = new FileOutbox(path.join(DAEMON_DIR, 'state', 'file-outbox'), binding,
     (...args) => outbound.serial(() => lark(...args)), {getRoute,notify:(text,key,jobId)=>outbound.text(text,key,getRoute(jobId))});
-  const final=createReplyDelivery({binding,actions,outbound,files,cloudDocs,nativeInteractions,getRoute,log,reportOptions:{
+  const backgroundRoot=path.join(DAEMON_DIR,'state','background-v1');
+  const taskResults=binding.group_access==='all_group_humans'?new TaskResultStore({root:path.join(DAEMON_DIR,'state','task-results-v1'),
+    inboxRoot:INBOX_ROOT,completionRoot:path.join(DAEMON_DIR,'state','completions-v1'),binding,codexHome:config.runtime.codex_home,backgroundRoot}):null;
+  const final=createReplyDelivery({binding,actions,outbound,files,cloudDocs,nativeInteractions,getRoute,log,taskResults,reportOptions:{
     reportRoot:path.join(DAEMON_DIR,'state','reports-v1'),fileOutboxRoot:path.join(DAEMON_DIR,'state','file-outbox'),inboxRoot:INBOX_ROOT,
   }});
   const performance=new DeferredPerformance(path.join(DAEMON_DIR,'state','performance-v1'),{onError:category=>log(category,{bot:binding.bot})});
-  const backgroundRoot=path.join(DAEMON_DIR,'state','background-v1');
   inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
+    perTaskResults:event=>!!taskResults && (!event.synthetic_callback || (event.background_completion===true || !!event.action_context_id)
+      && inbox.jobs.get(event.action_source_job_id)?.taskResultProtocolVersion===1),
+    taskResultScope:{cwd:binding.cwd,codexHome:config.runtime.codex_home},
+    taskResults,
+    closeLinkedTaskCard:(key,context)=>{
+      const owner=inbox.jobs.get(context.ownerJobId);
+      if(!owner || !isBoundJob(binding,owner))throw Object.assign(Error('task_link_owner_unavailable'),{permanent:true});
+      return outbound.linkTaskCard(key,owner.streamKey??inbox.progressKey(owner),context);
+    },
     onQueued:()=>dispatchWake.signal(),
     dispatchContextVerified:(_event,_prepared,job)=>dispatchNativeContextVerified(binding,job),
     parallelPreparation:event=>readonlyEligible(binding,event),
@@ -1185,6 +1197,10 @@ async function durableBotLoops(binding) {
       if(event.background_completion===true) {
         if(!verifyBackgroundCompletion(binding,event,backgroundRoot))
           throw Object.assign(Error('background_completion_unverified'),{permanent:true});
+        return event;
+      }
+      if(job.taskResultProtocolVersion===1 && event.synthetic_callback && event.action_context_id) {
+        taskResults.verifyActionEvent(event);
         return event;
       }
       const context=await prepareDispatchNativeContext(binding,job,contextRequest),hydrated=context.event;
@@ -1204,10 +1220,15 @@ async function durableBotLoops(binding) {
         throw Object.assign(Error('background_completion_unverified'),{permanent:true});
       const trustedTaskControl=ops?.controlProtocol(job.prepared),route=ops?.routePlan(job.event);
       const trustedTaskRoute=!trustedTaskControl && route?.lane==='background'?route:null;
+      const trustedTaskAction=job.taskResultProtocolVersion===1 && job.event.synthetic_callback && job.event.action_context_id
+        ?taskResults.verifyActionEvent(job.event):null;
       const trustedCollaborationContext=!trustedBackgroundCompletion&&!trustedTaskControl?ops?.collaborationProtocol(job):null;
       const trustedResearchSources=!trustedTaskControl?ops?.researchProtocol():null;
+      const trustedTaskResult=job.taskResultProtocolVersion===1 && !trustedTaskControl?{schema:1,
+        ownerJobId:trustedTaskAction?.ownerJobId??(trustedBackgroundCompletion?job.event.action_source_job_id:job.id),
+        continuationKind:trustedTaskAction?'action':trustedBackgroundCompletion?'background':null}:null;
       const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now,trustedBackgroundCompletion,trustedTaskControl,trustedTaskRoute,
-        trustedCollaborationContext,trustedResearchSources});
+        trustedCollaborationContext,trustedResearchSources,trustedTaskResult});
       job.readonlyPrefetchIncluded=!!verifiedReadonly(binding,job.prepared,now)?.result;
       inbox.save(job);
       if(target.pty?.transport==='managed_app_server') {
@@ -1336,19 +1357,21 @@ async function durableBotLoops(binding) {
     const stats=inbox.stats();
     const backgroundStats=background.stats();
     const opsStats=ops.stats();
+    const taskStats=taskResults?.stats()??{task_result_pending_count:0,task_result_blocked_count:0};
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count
       +backgroundStats.background_queued_count+backgroundStats.background_running_count+backgroundStats.background_result_pending_count
-      +opsStats.ops_control_pending_count+opsStats.ops_alert_pending_count+opsStats.ops_delivery_pending_count+opsStats.collaboration_operation_pending_count;
+      +opsStats.ops_control_pending_count+opsStats.ops_alert_pending_count+opsStats.ops_delivery_pending_count+opsStats.collaboration_operation_pending_count+taskStats.task_result_pending_count;
     const fileStats=files.stats();
     const actionStats=actions.stats();
     const nativeStats=nativeInteractions.actions.stats();
     const reactionStats=reactions?.stats()??{reaction_blocked_count:1,reaction_last_error:'state_unavailable'};
-    updateBotStatus(binding.bot,{...stats,...backgroundStats,...opsStats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
+    updateBotStatus(binding.bot,{...stats,...backgroundStats,...opsStats,...taskStats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
       voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
       state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked||backgroundStats.background_blocked_count||backgroundStats.background_admission_blocked_count
         ||opsStats.ops_policy_blocked_count||opsStats.ops_control_blocked_count||opsStats.ops_alert_blocked_count||opsStats.ops_delivery_blocked_count
-        ||opsStats.collaboration_operation_blocked_count||opsStats.collaboration_policy_blocked_count||opsStats.metrics_policy_blocked_count||opsStats.research_policy_blocked_count?'degraded':busy?'processing':'idle',
+        ||opsStats.collaboration_operation_blocked_count||opsStats.collaboration_policy_blocked_count||opsStats.metrics_policy_blocked_count||opsStats.research_policy_blocked_count
+        ||taskStats.task_result_blocked_count||stats.task_result_protocol_blocked_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };
