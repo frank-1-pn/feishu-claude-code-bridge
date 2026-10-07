@@ -40,6 +40,12 @@ node "<运行目录>/codex-bridge-complete.mjs" --bot <本轮bot> --job-id <本�
 
 工具只写独立持久结构化请求，不并发修改 worker 的 job。仅允许当前全群绑定内已 submitted/delivered 的普通消息；worker 独立核实原 thread 的 user marker 后将该 job 记为 `done`、`completionDisposition=silent`，清除待回包、待进度和旧超时通知。不发送群消息、不创建答复送达记录，`silent_completed_count` 单独计数。排入完成请求不等于 worker 已确认完成。多个同 turn 消息需要逐条完成；未标记的消息继续等待正常答复。普通 final 文本不是静默协议，不支持魔法字符串。静默请求和消息本身同样跨重启去重；绑定变化或篡改请求拒绝，不重新执行业务动作。
 
+## 工作区请求与私有消费确认
+
+feedback 与 silent CLI 先写绑定 cwd 的私有请求目录，由原 worker 通过真实 marker 和不可变分类通道受理；模型不需要写 daemon 私有目录。返回 queued/applied=false 不能称为已显示表情或卡片。分类和结果同批到达时按分类、原消息核验、结果的顺序消费，避免模型快速结束与轮询竞争。消费者保留私有 ACK 和拒绝原因，重启只能按稳定 key 对账；不删除拒绝记录或重执行业务来清空队列。
+
+维护检查除既有队列外还须读 `agent_request_pending_count`、`agent_request_blocked_count`，缺失不是零。工作区请求不允许指定其他 bot、thread、chat、cwd、权限或任意脚本；输入字段、原消息和结果仍由既有私有 store 重新验证。
+
 ## 原消息的表情状态
 
 bridge 自动给真实入站消息添加原生表情：`OnIt` 表示已持久入队；确认原 thread 的 rollout 入站标记后切换为 `Typing`；最终回包送达并写入 checkpoint 后切换为 `DONE`。`DONE` 表示本轮回复已送达，不保证业务任务成功。失败或回包永久阻塞用 `ERROR`，等待超时或 rollout 读取异常用 `OneSecond`。按钮、表单的合成回调不添加表情；不批量补标历史已完成消息。

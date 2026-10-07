@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DurableInbox, normalizeEvent } from './codex-bridge-inbox.mjs';
+import { DurableInbox, normalizeEvent, digest } from './codex-bridge-inbox.mjs';
 
 function fixture(t, overrides={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-test-'));
@@ -144,4 +144,22 @@ test('all commentary events in a scan retain original times and byte positions; 
   assert.deepEqual(progress.map(p=>p.observedAt),[9000,9000,9000]);
   assert.ok(progress.every((p,i)=>!i||p.position>progress[i-1].position));
   const q=f.open();await q.watch();assert.equal(progress.length,3);
+});
+
+test('a result published at the owning final boundary is refreshed before blocking, with durable original marker proof',async t=>{
+  let disposition=null,result=null,calls=0;const observations=[],published=[];
+  const f=fixture(t,{perTaskResults:true,classifiedFeedback:true,classification:()=>disposition,
+    taskResults:{get:()=>result},onMarkerScanned:job=>{
+      const durable=JSON.parse(fs.readFileSync(path.join(f.root,'test',`job-${digest(job.id)}.json`),'utf8'));
+      observations.push(durable);
+      if(++calls===1)disposition='actionable';
+      else result={ownerJobId:job.id,status:'complete',text:'原任务的核验结果',replyKey:'a'.repeat(64),revision:1};
+    },final:async(text,key)=>{published.push({text,key});return {schema:1,at:1000,source:'send_response'};}});
+  const job=f.q.enqueue(event('boundary'));await f.q.dispatchOne();
+  f.append({type:'turn_context',payload:{turn_id:'owning-turn'}},marker('boundary'),answer('不应发送的自然final'));
+  await f.q.watch();await f.q.deliverReplies();
+  assert.equal(job.taskResultProtocolBlocked,undefined);assert.equal(job.status,'done');
+  assert.equal(calls,2);assert.ok(observations.every(j=>j.markerSeen&&j.markerTurnId==='owning-turn'&&j.markerPosition>0));
+  assert.equal(observations[0].feedbackDisposition,undefined);
+  assert.deepEqual(published.map(x=>x.text),['原任务的核验结果']);assert.equal(f.injected.length,1);
 });

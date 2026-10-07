@@ -233,7 +233,8 @@ export class ActionStore {
       if (callback.context?.open_message_id !== context.messageId) fail('unauthorized');
       const current = read(path.join(this.dir, `latest-${context.keyHash}.json`));
       if (value.version !== context.version || current.contextId !== context.contextId) fail('stale_context');
-      if (this.now() >= context.expiresAt) fail('expired');
+      const acceptedAt = this.now();
+      if (acceptedAt >= context.expiresAt) fail('expired');
       if (context.mode === 'waiting' && value.action !== 'conditions') fail('invalid_action');
       const values = value.action === 'conditions' ? formValues(callback.action.form_value, context.form) : {};
       if (value.action !== 'conditions' && callback.action.form_value && Object.keys(callback.action.form_value).length) fail('invalid_action');
@@ -264,14 +265,14 @@ export class ActionStore {
       const sequence = (fs.existsSync(this.sequenceFile) ? read(this.sequenceFile).next : 1);
       if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error('invalid_action_sequence');
       durableWrite(this.sequenceFile, { next: sequence + 1 });
-      const operation = { id: operationId, contextId: context.contextId, action: value.action, acceptedAt: this.now(), sequence,
+      const operation = { id: operationId, contextId: context.contextId, action: value.action, acceptedAt, sequence,
         binding: { bot: this.bot, chat_id: context.chatId, allowed_sender_id: context.allowedSenderId, codex_thread_id: context.codexThreadId },
         event: { type: 'message', message_type: 'text', message_id: operationId, chat_id: context.chatId,
           sender_id: context.allowedSenderId, codex_thread_id: context.codexThreadId,
           content: JSON.stringify({ text: promptFor(context, value.action, values) }),
           action_context_id: context.contextId, action_source_job_id: context.sourceJobId,
           action_source_message_id: context.messageId, action_type: value.action,
-          timestamp: new Date(this.now()).toISOString(), synthetic_callback: true } };
+          timestamp: new Date(acceptedAt).toISOString(), synthetic_callback: true } };
       for (const replayFile of replayFiles) durableWrite(replayFile, { logical, operation });
       durableWrite(operationFile, operation);
       return outcome('accepted', { eventId: operationId });

@@ -20,6 +20,12 @@ node "<daemon>/codex-bridge-task-results-cli.mjs" --bot <bot> --job-id <本轮�
 
 工具 queued 只证明不可变结果已受理，不能冒充送达。提交后释放对话，不再手发群消息或重复完整 final。runtime 验证原消息、真实分类/marker、绑定与私有快照后，分别将结果送回各自原卡；报告、附件与按钮绑定该任务。
 
+## 受限会话与受控恢复
+
+可执行 CLI 保持上面的参数，先在绑定 cwd 内 `.codex-bridge-requests-v1/` 发布私有不可变请求，既有 worker 再按真实来源、marker、分类与原 store 接受结果。模型的 workspace-write 不必获得 daemon/state 写权限。工具 queued/applied=false 只说明请求保存；private ACK 的 applied 才表示结果已受理，最终送达仍以原结果 receipt/平台读回为准。未知状态使用原 resultKey 对账，不重新执行已成功业务。
+
+旧 turn 已结束且协议阻塞的任务不能靠工作区自称时间、普通 final 或新请求自动解锁。维护恢复须有 daemon 私有目录中明确审核的固定原结果证明，精确匹配绑定、source、原 marker turn、阻塞记录、请求 hash 和私有文件；只补原结果交付，不查询或重做业务，不把下一轮答案当成原任务结果。正常完成、等待和背景续办继续原版本及权限检查。
+
 ## 补充条件与后台完成
 
 仅明确属于原任务、同发送者的真实 parent/reply_to 链可显式关联；直接回复 bot 原任务卡时，通过私有出站卡片与原任务的唯一映射核验。共享 turn、root/thread、最近一条消息不构成关联；无真实链、跨发送者或多候选时澄清，不能猜测。业务权限与多人 CT 上下文继续独立核对，本入口不执行资源变更。

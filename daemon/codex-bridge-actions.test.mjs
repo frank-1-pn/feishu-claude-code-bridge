@@ -44,6 +44,16 @@ test('three allowlisted actions durably enqueue into original thread in accepted
   assert.deepEqual(f.store.stats(), { accepted_count: 3, pending_count: 0 });
 });
 
+test('an advancing clock produces one callback acceptance instant for operation and event',t=>{
+  let ticks=100000;const f=fixture(t,{now:()=>ticks++});const before=ticks;
+  const accepted=f.accept(f.callback());assert.equal(accepted.reason,'accepted');
+  const operation=JSON.parse(fs.readFileSync(f.store.operationFile(f.context.contextId,accepted.eventId),'utf8'));
+  assert.equal(ticks,before+1);assert.equal(operation.acceptedAt,before);
+  assert.equal(operation.event.timestamp,new Date(operation.acceptedAt).toISOString());
+  const q=f.inbox();f.store.drain({binding:f.binding,inbox:q});
+  assert.deepEqual(q.jobs.get(accepted.eventId).event,operation.event);
+});
+
 test('rejects spoofed operator, chat, card, authenticated bot, app and current binding', t => {
   const f = fixture(t);
   for (const mutate of [event => { event.event.operator.open_id = 'ou_bad'; }, event => { event.event.context.open_chat_id = 'oc_bad'; },

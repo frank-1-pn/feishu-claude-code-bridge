@@ -8,7 +8,7 @@ import {ActionStore} from './codex-bridge-actions.mjs';
 import {DurableInbox,digest} from './codex-bridge-inbox.mjs';
 import {bindingSnapshot} from './codex-bridge-ux.mjs';
 import {atomicWriteJson} from './codex-bridge-storage.mjs';
-import {TaskResultStore} from './codex-bridge-task-results.mjs';
+import {TaskResultStore,taskResultSourceHash,taskResultRequestHash} from './codex-bridge-task-results.mjs';
 import {runTaskResultCli,parseTaskResultArguments} from './codex-bridge-task-results-cli.mjs';
 import {BackgroundScheduler,verifyBackgroundCompletion} from './codex-bridge-background.mjs';
 import {enqueueBackgroundTask,readBackgroundJson} from './codex-bridge-background-store.mjs';
@@ -217,10 +217,10 @@ test('abandoned linked publication remains blocked and never becomes a replayabl
   assert.throws(()=>f.store.get(owner),/private_file_invalid/);
 });
 
-function actionFixture(t,{status='complete',action='shorter'}={}) {
+function actionFixture(t,{status='complete',action='shorter',now=()=>1000}={}) {
   const f=fixture(t),owner=f.add(),streamKey='fixture-task-card';owner.streamKey=streamKey;f.inbox.save(owner);
   const first=f.store.submit(owner.id,request({status}));f.receipt(first);owner.status='done';f.inbox.save(owner);
-  const actions=new ActionStore({root:path.join(f.stateRoot,'actions-v1'),bot:f.binding.bot,now:()=>1000});
+  const actions=new ActionStore({root:path.join(f.stateRoot,'actions-v1'),bot:f.binding.bot,now});
   const registration={key:`task:${owner.id}`,sourceJobId:owner.id,codexThreadId:f.binding.codex_thread_id,chatId:f.binding.chat_id,
     allowedSenderId:f.binding.allowed_sender_id,answer:first.text,messageId:'om_visiblecard',version:1,mode:status==='waiting'?'waiting':'complete'};
   const context=actions.registerContext(registration),cardFile=path.join(f.stateRoot,'outbound-v3',f.binding.bot,`card-${digest(streamKey)}.json`);
@@ -245,6 +245,38 @@ test('authentic action callback is validated before marker; quick answer revisio
   assert.throws(()=>f.store.verifyActionEvent(f.callback.event),/action_stale/);
   assert.equal(f.store.get(f.owner).text,revised.text);assert.equal(f.store.get(f.callback).updateKind,'answer_revision');
   assert.equal(f.store.submit(f.callback.id,request({resultKey:'shorter-v2',text:revised.text})).duplicate,true);
+});
+
+test('actual ActionStore callback remains verifiable when each clock read advances',t=>{
+  let ticks=1000;const f=actionFixture(t,{now:()=>ticks++});
+  const operation=JSON.parse(fs.readFileSync(f.actions.operationFile(f.context.contextId,f.callback.id),'utf8'));
+  assert.equal(ticks,1004);assert.equal(operation.acceptedAt,1002); // Drain has its own later checkpoint clock sample.
+  assert.equal(f.callback.event.timestamp,new Date(1002).toISOString());
+  assert.deepEqual(f.store.verifyActionEvent(f.callback.event),{ownerJobId:f.owner.id,action:'shorter'});
+  f.activate();assert.equal(f.store.submit(f.callback.id,request({resultKey:'clock-callback-v2'})).ownerJobId,f.owner.id);
+});
+
+test('private accepted historical callback allows bounded canonical forward skew and rejects timestamp forgery',t=>{
+  const f=actionFixture(t),operationFile=f.actions.operationFile(f.context.contextId,f.callback.id),
+    original=JSON.parse(fs.readFileSync(operationFile,'utf8')),
+    contextFile=f.actions.contextFile(f.context.contextId),context=JSON.parse(fs.readFileSync(contextFile,'utf8'));
+  const timestamp=(value,{operation=true}={})=>{
+    f.callback.event={...original.event,timestamp:value};f.inbox.save(f.callback);
+    atomicWriteJson(operationFile,{...original,event:operation?{...f.callback.event}:original.event});
+  };
+  for(const offset of [0,1,1000]) {
+    timestamp(new Date(original.acceptedAt+offset).toISOString());
+    assert.equal(f.store.verifyActionEvent(f.callback.event).ownerJobId,f.owner.id);
+  }
+  for(const value of [new Date(original.acceptedAt-1).toISOString(),new Date(original.acceptedAt+1001).toISOString(),
+    '1970-01-01T00:00:01Z','1970-01-01T00:00:01.000+00:00','invalid']) {
+    timestamp(value);assert.throws(()=>f.store.verifyActionEvent(f.callback.event),/action_unverified/);
+  }
+  timestamp(new Date(original.acceptedAt+1).toISOString(),{operation:false});
+  assert.throws(()=>f.store.verifyActionEvent(f.callback.event),/action_unverified/);
+  atomicWriteJson(contextFile,{...context,expiresAt:original.acceptedAt+20});
+  timestamp(new Date(original.acceptedAt+19).toISOString());assert.equal(f.store.verifyActionEvent(f.callback.event).ownerJobId,f.owner.id);
+  timestamp(new Date(original.acceptedAt+20).toISOString());assert.throws(()=>f.store.verifyActionEvent(f.callback.event),/action_unverified/);
 });
 
 test('form continuation requires waiting owner; operation/event/context/private-card tampering fails closed',t=>{
@@ -283,4 +315,63 @@ test('valid user form can freeze only an explicit waiting result',t=>{
   const f=fixture(t),source=f.add(),text='请补充资料。\n```feishu-form\n'+JSON.stringify({version:1,title:'条件',fields:[{name:'extra',label:'要求',type:'text'}]})+'\n```';
   assert.throws(()=>f.store.submit(source.id,request({text})),/form_status_mismatch/);assert.equal(f.store.get(source),null);
   assert.equal(f.store.submit(source.id,request({text,status:'waiting'})).status,'waiting');
+});
+
+function recoveryFixture(t) {
+  const f=fixture(t),owner=f.add(),value=request({title:'只读结果恢复',text:'原先已读取的查询结果；自动提醒仍未启用。'}),stamp=Date.now();
+  Object.assign(owner,{markerTurnId:'fixture-owning-turn',streamKey:'fixture-recovery-stream',taskResultProtocolBlocked:'turn_ended_without_task_result',
+    taskResultProtocolBlockedAt:stamp-1000});f.inbox.save(owner);
+  const file=path.join(f.base,'reviewed-result.json');atomicWriteJson(file,value);
+  const cardFile=path.join(f.store.outboundRoot,f.binding.bot,`card-${digest(owner.streamKey)}.json`);
+  atomicWriteJson(cardFile,{key:owner.streamKey,jobId:owner.id,messageId:'om_original_card',final:false,revision:2,sentRevision:2});
+  const proof={schema:1,action:'resume_delivery_only',reviewed:true,scopeHash:f.store.scopeHash,sourceHash:taskResultSourceHash(owner),markerTurnId:owner.markerTurnId,
+    blockedCode:owner.taskResultProtocolBlocked,blockedAt:owner.taskResultProtocolBlockedAt,requestHash:taskResultRequestHash(value),requestFile:file,
+    requestFileSha256:digest(fs.readFileSync(file)),reviewedAt:new Date(stamp).toISOString()};
+  const proofFile=f.store.recoveryFile(owner.id,value.resultKey);fs.mkdirSync(path.dirname(proofFile),{recursive:true,mode:0o700});atomicWriteJson(proofFile,proof);
+  return {...f,owner,value,file,cardFile,proof,proofFile,stamp,store:f.store};
+}
+
+test('reviewed private recovery freezes only the original delivery and reconciles duplicates after expiry',t=>{
+  const f=recoveryFixture(t),before=fs.readFileSync(path.join(f.inboxRoot,f.binding.bot,`job-${digest(f.owner.id)}.json`));
+  assert.throws(()=>f.store.submit(f.owner.id,f.value),/submitter_not_active/);
+  const result=f.store.recover(f.owner.id,f.value);assert.equal(result.duplicate,false);assert.equal(result.revision,1);assert.equal(result.delivered,false);
+  assert.deepEqual(fs.readFileSync(path.join(f.inboxRoot,f.binding.bot,`job-${digest(f.owner.id)}.json`)),before);
+  assert.equal(f.store.get(f.owner).text,f.value.text);f.receipt(result);
+  f.owner.status='done';delete f.owner.taskResultProtocolBlocked;delete f.owner.taskResultProtocolBlockedAt;f.inbox.save(f.owner);
+  fs.unlinkSync(f.file);f.open({now:()=>f.stamp+60*60*1000});
+  const duplicate=f.store.recover(f.owner.id,f.value);assert.equal(duplicate.duplicate,true);assert.equal(duplicate.delivered,true);assert.equal(duplicate.replyKey,result.replyKey);
+  assert.throws(()=>f.store.recover(f.owner.id,{...f.value,resultKey:'unreviewed-next'}));assert.equal(f.store.history(f.owner).length,1);
+});
+
+test('missing, stale, mismatched or workspace supplied recovery approval cannot bypass ordinary source protection',t=>{
+  const f=recoveryFixture(t);
+  const patches=[{reviewed:false},{action:'rerun_business'},{sourceHash:'0'.repeat(64)},{scopeHash:'0'.repeat(64)},{markerTurnId:'other-turn'},
+    {blockedAt:f.proof.blockedAt+1},{requestHash:'0'.repeat(64)},{requestFileSha256:'0'.repeat(64)},{reviewedAt:new Date(f.stamp-16*60*1000).toISOString()},
+    {reviewedAt:new Date(f.stamp+60000).toISOString()},{extra:'forged'}];
+  for(const patch of patches) {atomicWriteJson(f.proofFile,{...f.proof,...patch});assert.throws(()=>f.store.recover(f.owner.id,f.value));assert.equal(f.store.history(f.owner).length,0);}
+  atomicWriteJson(f.proofFile,f.proof);fs.chmodSync(f.proofFile,0o644);assert.throws(()=>f.store.recover(f.owner.id,f.value));fs.chmodSync(f.proofFile,0o600);
+  fs.linkSync(f.proofFile,path.join(f.base,'proof-link'));assert.throws(()=>f.store.recover(f.owner.id,f.value));fs.unlinkSync(path.join(f.base,'proof-link'));
+  fs.renameSync(f.proofFile,f.proofFile+'.original');fs.symlinkSync(f.proofFile+'.original',f.proofFile);assert.throws(()=>f.store.recover(f.owner.id,f.value));
+  fs.unlinkSync(f.proofFile);assert.throws(()=>f.store.recover(f.owner.id,f.value));
+  assert.throws(()=>f.store.submit(f.owner.id,f.value,{reviewed:true}),/submitter_not_active/);
+});
+
+test('recovery cannot revise changed payloads, linked/callback sources or a successful or unknown card delivery',t=>{
+  const f=recoveryFixture(t);atomicWriteJson(f.file,{...f.value,text:'后来改写的答案'});assert.throws(()=>f.store.recover(f.owner.id,f.value),/request_changed/);
+  atomicWriteJson(f.file,f.value);const card=JSON.parse(fs.readFileSync(f.cardFile));
+  for(const patch of [{final:true},{cardClosed:true},{blocked:true},{finalDelivered:true},{finalReplyKey:'existing'},{deliveryUncertain:true},{taskResult:{status:'complete'}},{jobId:'om_other'}]) {
+    atomicWriteJson(f.cardFile,{...card,...patch});assert.throws(()=>f.store.recover(f.owner.id,f.value));
+  }
+  atomicWriteJson(f.cardFile,card);const priorKey=digest(`${f.store.scopeHash}\0${f.owner.id}\0${f.value.resultKey}`);
+  atomicWriteJson(path.join(f.inboxRoot,f.binding.bot,`sent-${priorKey}.json`),{sentAt:f.stamp});assert.throws(()=>f.store.recover(f.owner.id,f.value),/already_sent/);
+  const source=f.add('om_linked',{parent_id:f.owner.id});f.store.link(source.id,f.owner.id);assert.throws(()=>f.store.recover(source.id,f.value),/source_invalid/);
+});
+
+test('recovery rechecks card and sent evidence immediately before its immutable CAS',t=>{
+  const f=recoveryFixture(t),check=f.store.assertRecoveryDelivery.bind(f.store);let validations=0;
+  f.store.assertRecoveryDelivery=(source,value)=>{
+    if(++validations===2) {const card=JSON.parse(fs.readFileSync(f.cardFile));atomicWriteJson(f.cardFile,{...card,cardClosed:true});}
+    return check(source,value);
+  };
+  assert.throws(()=>f.store.recover(f.owner.id,f.value),/card_invalid/);assert.equal(validations,2);assert.equal(f.store.history(f.owner).length,0);
 });

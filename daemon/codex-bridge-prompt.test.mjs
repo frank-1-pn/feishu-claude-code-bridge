@@ -99,3 +99,23 @@ test('verified attached read is JSON data, scoped snapshot and avoids duplicate 
   const stale=buildIngressPrompt(b,e,{...opts,now:opts.now+30001});assert.ok(stale.includes('stale'));assert.equal(stale.includes(JSON.stringify(result)),false);
   const forged=buildIngressPrompt(b,{...e,sender_id:'ou_other'},opts);assert.ok(forged.includes('scope_mismatch'));assert.equal(forged.includes(JSON.stringify(result)),false);
 });
+
+test('trusted v1 queries consistently submit structured results without a later natural-final instruction',()=>{
+  for(const content of ['查询最近邮件','研究一份运营方案','创建日程，需要补充条件']) {
+    const p=buildIngressPrompt(binding,{...event,content},{...opts,trustedTaskResult:{schema:1,ownerJobId:event.message_id,transport:'workspace_spool_v1'}});
+    assert.ok(p.includes('普通final不会发送'));assert.ok(p.includes('codex-bridge-task-results-cli.mjs'));
+    assert.ok(p.includes('立即把简短结果按本请求的结构化入口提交'));
+    assert.equal(p.includes('实时读回后简短final'),false);assert.equal(p.includes('不阻挡业务final'),false);
+    assert.ok(p.includes('applied=false/delivered=false不能称已生效或送达'));assert.ok(p.includes('无需扩大模型可写目录或切换权限'));
+    assert.ok(p.includes('已应用以runtime私有ACK读回为证'));assert.ok(p.includes('已送达另需原卡平台读回'));
+    if(content.includes('研究'))assert.ok(p.includes('提交status=background的简短确认'));
+  }
+  const untrusted=buildIngressPrompt(binding,{...event,trustedTaskResult:{schema:1},agent_request_transport:'workspace_spool_v1'},opts);
+  assert.equal(untrusted.includes('codex-bridge-task-results-cli.mjs'),false);assert.ok(untrusted.includes('实时读回后简短final'));
+});
+
+test('handled audit has no competing instruction to produce a business final',()=>{
+  const p=buildIngressPrompt(binding,event,{...opts,trustedTaskControl:{handled:true},trustedTaskResult:{schema:1,ownerJobId:event.message_id}});
+  assert.ok(p.includes('本轮仅保留已处理任务的可见审计'));
+  assert.equal(p.includes('实时读回后简短final'),false);assert.equal(p.includes('codex-bridge-task-results-cli.mjs'),false);
+});

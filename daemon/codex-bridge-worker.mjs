@@ -55,6 +55,7 @@ import {DeferredPerformance} from './codex-bridge-performance.mjs';
 import {WakeSignal,EventFileWakeup} from './codex-bridge-wakeup.mjs';
 import {createOpsRuntime,stripExternalOpsFields} from './codex-bridge-ops-runtime.mjs';
 import {TaskResultStore} from './codex-bridge-task-results.mjs';
+import {AgentRequestDispatcher} from './codex-bridge-agent-requests.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -1128,7 +1129,7 @@ async function sendDurableText(binding, text, key) {
 
 
 async function durableBotLoops(binding) {
-  let reactions,inbox,nativeInteractions,ops;
+  let reactions,inbox,nativeInteractions,ops,agentRequests;
   const intakeWake=new WakeSignal(),dispatchWake=new WakeSignal(),managed=new ManagedConnection();
   const eventWake=new EventFileWakeup(binding.logPath,intakeWake);
   const resources=[intakeWake,dispatchWake,managed,eventWake];
@@ -1181,6 +1182,7 @@ async function durableBotLoops(binding) {
       && inbox.jobs.get(event.action_source_job_id)?.taskResultProtocolVersion===1),
     taskResultScope:{cwd:binding.cwd,codexHome:config.runtime.codex_home},
     taskResults,
+    onMarkerScanned:()=>agentRequests?.drain(),
     closeLinkedTaskCard:(key,context)=>{
       const owner=inbox.jobs.get(context.ownerJobId);
       if(!owner || !isBoundJob(binding,owner))throw Object.assign(Error('task_link_owner_unavailable'),{permanent:true});
@@ -1226,6 +1228,7 @@ async function durableBotLoops(binding) {
       const trustedResearchSources=!trustedTaskControl?ops?.researchProtocol():null;
       const trustedTaskResult=job.taskResultProtocolVersion===1 && !trustedTaskControl?{schema:1,
         ownerJobId:trustedTaskAction?.ownerJobId??(trustedBackgroundCompletion?job.event.action_source_job_id:job.id),
+        ...(agentRequests?{transport:'workspace_spool_v1'}:{}),
         continuationKind:trustedTaskAction?'action':trustedBackgroundCompletion?'background':null}:null;
       const now=Date.now(),prompt=buildIngressPrompt(binding,job.prepared,{daemonDir:DAEMON_DIR,now,trustedBackgroundCompletion,trustedTaskControl,trustedTaskRoute,
         trustedCollaborationContext,trustedResearchSources,trustedTaskResult});
@@ -1262,6 +1265,12 @@ async function durableBotLoops(binding) {
     },
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
+  if(taskResults)try {
+    agentRequests=new AgentRequestDispatcher({stateRoot:path.join(DAEMON_DIR,'state'),configFile:bindingsPath,
+      binding,codexHome:config.runtime.codex_home,taskResults,onClassification:id=>{
+        const job=inbox.jobs.get(id);if(job)inbox.completeSilently(job);
+      }});
+  }catch{log('agent_request_state_unavailable',{bot:binding.bot});}
   const background=new BackgroundScheduler({root:backgroundRoot,inboxRoot:INBOX_ROOT,binding,inbox,
     codexCliJs:config.runtime.codex_cli_js,codexHome:config.runtime.codex_home});
   ops=createOpsRuntime({binding,codexHome:config.runtime.codex_home,stateDir:path.join(DAEMON_DIR,'state'),
@@ -1348,6 +1357,7 @@ async function durableBotLoops(binding) {
     atomicWriteText(binding.receiptOffsetPath,String(readOffset(binding)??0));
   };
   const watch = async () => {
+    agentRequests?.drain();
     await inbox.watch();
     // Recover a successful send whose inbox timing checkpoint was interrupted.
     for(const job of inbox.jobs.values())if(job.streamKey && job.firstCardSentAt===undefined){
@@ -1358,20 +1368,23 @@ async function durableBotLoops(binding) {
     const backgroundStats=background.stats();
     const opsStats=ops.stats();
     const taskStats=taskResults?.stats()??{task_result_pending_count:0,task_result_blocked_count:0};
+    const agentStats=agentRequests?.stats()??{agent_request_pending_count:taskResults?null:0,agent_request_blocked_count:taskResults?1:0};
     const busy=stats.queued_count+stats.awaiting_delivery_count+stats.awaiting_reply_count+stats.reply_pending_count
       +backgroundStats.background_queued_count+backgroundStats.background_running_count+backgroundStats.background_result_pending_count
-      +opsStats.ops_control_pending_count+opsStats.ops_alert_pending_count+opsStats.ops_delivery_pending_count+opsStats.collaboration_operation_pending_count+taskStats.task_result_pending_count;
+      +opsStats.ops_control_pending_count+opsStats.ops_alert_pending_count+opsStats.ops_delivery_pending_count+opsStats.collaboration_operation_pending_count+taskStats.task_result_pending_count
+      +(agentStats.agent_request_pending_count??0);
     const fileStats=files.stats();
     const actionStats=actions.stats();
     const nativeStats=nativeInteractions.actions.stats();
     const reactionStats=reactions?.stats()??{reaction_blocked_count:1,reaction_last_error:'state_unavailable'};
-    updateBotStatus(binding.bot,{...stats,...backgroundStats,...opsStats,...taskStats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
+    updateBotStatus(binding.bot,{...stats,...backgroundStats,...opsStats,...taskStats,...agentStats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
+      agent_request_transport:agentRequests?'workspace_spool_v1':null,agent_request_runtime_enabled:!!agentRequests,
       voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
       state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked||backgroundStats.background_blocked_count||backgroundStats.background_admission_blocked_count
         ||opsStats.ops_policy_blocked_count||opsStats.ops_control_blocked_count||opsStats.ops_alert_blocked_count||opsStats.ops_delivery_blocked_count
         ||opsStats.collaboration_operation_blocked_count||opsStats.collaboration_policy_blocked_count||opsStats.metrics_policy_blocked_count||opsStats.research_policy_blocked_count
-        ||taskStats.task_result_blocked_count||stats.task_result_protocol_blocked_count?'degraded':busy?'processing':'idle',
+        ||taskStats.task_result_blocked_count||stats.task_result_protocol_blocked_count||agentStats.agent_request_blocked_count?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };

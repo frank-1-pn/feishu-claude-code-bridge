@@ -24,6 +24,8 @@ const identity=job=>({id:job.id,acceptedAt:job.acceptedAt,sequence:job.sequence,
   taskResultProtocolScope:job.taskResultProtocolScope,
   event:Object.fromEntries(eventFields.filter(k=>job.event?.[k]!==undefined).map(k=>[k,job.event[k]]))});
 const sourceHash=job=>digest(stableJson(identity(job)));
+export const taskResultSourceHash=sourceHash;
+export const taskResultRequestHash=request=>digest(stableJson(requestValue(request)));
 function json(file,{optional=false,maxBytes=MAX_BYTES}={}) {
   const bytes=privateRead(file,{optional,maxBytes,mode:0o600});if(bytes===null)return null;
   if(fs.lstatSync(file).nlink!==1)fail('task_result_private_file_invalid');
@@ -44,12 +46,13 @@ function requestValue(request) {
 // or message-provided protocol/association field can select an answer.
 export class TaskResultStore {
   constructor({root,inboxRoot,completionRoot,binding,codexHome,backgroundRoot=path.join(path.dirname(root??''),'background-v1'),
-    actionRoot=path.join(path.dirname(root??''),'actions-v1'),outboundRoot=path.join(path.dirname(root??''),'outbound-v3')}) {
-    if([root,inboxRoot,completionRoot,codexHome,binding?.cwd,backgroundRoot,actionRoot,outboundRoot].some(v=>!path.isAbsolute(v??'')||v!==path.resolve(v))
+    actionRoot=path.join(path.dirname(root??''),'actions-v1'),outboundRoot=path.join(path.dirname(root??''),'outbound-v3'),
+    recoveryRoot=path.join(path.dirname(root??''),'task-result-recovery-v1'),now=Date.now}) {
+    if([root,inboxRoot,completionRoot,codexHome,binding?.cwd,backgroundRoot,actionRoot,outboundRoot,recoveryRoot].some(v=>!path.isAbsolute(v??'')||v!==path.resolve(v))
         ||!keyPattern.test(binding?.bot??'')||binding.group_access!=='all_group_humans'||!binding.codex_thread_id)fail('task_result_runtime_invalid');
     const cwd=fs.realpathSync(binding.cwd);if(cwd!==binding.cwd)fail('task_result_runtime_invalid');
     if(fs.existsSync(codexHome)&&fs.realpathSync(codexHome)!==codexHome)fail('task_result_runtime_invalid');
-    Object.assign(this,{root,inboxRoot,completionRoot,binding,codexHome,backgroundRoot,actionRoot,outboundRoot});
+    Object.assign(this,{root,inboxRoot,completionRoot,binding,codexHome,backgroundRoot,actionRoot,outboundRoot,recoveryRoot,now});
     this.scope={binding:bindingSnapshot(binding),cwd,codexHome,root,inboxRoot,completionRoot,backgroundRoot,actionRoot,outboundRoot};
     this.scopeHash=digest(stableJson(this.scope));this.dir=path.join(root,binding.bot,this.scopeHash);
   }
@@ -134,6 +137,10 @@ export class TaskResultStore {
       allowed_sender_id:this.binding.allowed_sender_id,codex_thread_id:this.binding.codex_thread_id};
     const identity={keyHash:context.keyHash,sourceJobId:context.sourceJobId,codexThreadId:context.codexThreadId,chatId:context.chatId,
       allowedSenderId:context.allowedSenderId,answerHash:digest(context.answer),version:context.version,form:normalizeForm(context.form),mode:context.mode};
+    // Older acceptors took a second clock sample when building the event. Only
+    // the exact private accepted operation may carry this bounded legacy skew.
+    const eventMillis=typeof event.timestamp==='string'?Date.parse(event.timestamp):NaN;
+    const canonicalTimestamp=Number.isFinite(eventMillis)&&new Date(eventMillis).toISOString()===event.timestamp;
     if(owner.event.synthetic_callback||context.bot!==this.binding.bot||context.contextId!==contextId
         ||context.keyHash!==digest(`${this.binding.bot}\0task:${owner.id}`)||!same(context.identity,identity)
         ||context.answerHash!==identity.answerHash||!same(context.form,identity.form)
@@ -144,7 +151,8 @@ export class TaskResultStore {
         ||operation.id!==id||operation.contextId!==contextId||operation.action!==event.action_type||!same(operation.event,event)
         ||!same(operation.binding,binding)||!Number.isSafeInteger(operation.sequence)||operation.sequence<1
         ||!Number.isFinite(operation.acceptedAt)||operation.acceptedAt<context.createdAt||operation.acceptedAt>=context.expiresAt
-        ||event.timestamp!==new Date(operation.acceptedAt).toISOString()||event.action_source_job_id!==owner.id
+        ||!canonicalTimestamp||eventMillis<operation.acceptedAt||eventMillis>operation.acceptedAt+1000||eventMillis>=context.expiresAt
+        ||event.action_source_job_id!==owner.id
         ||event.action_source_message_id!==context.messageId||event.sender_id!==binding.allowed_sender_id
         ||event.codex_thread_id!==binding.codex_thread_id||event.chat_id!==binding.chat_id
         ||context.mode==='waiting'&&event.action_type!=='conditions')fail('task_result_action_unverified');
@@ -227,6 +235,10 @@ export class TaskResultStore {
       const role=this.role(source);if(!role||role.ownerJobId!==owner.id)fail('task_result_association_conflict');
       const expectedUpdate=role.via==='action'&&['shorter','sources','table'].includes(source.event.action_type)?'answer_revision':undefined;
       if(r.updateKind!==expectedUpdate)fail('task_result_record_changed');
+      if(r.recovery) {
+        if(i!==0||source.id!==owner.id||source.event.synthetic_callback||role.via!=='self')fail('task_result_recovery_invalid');
+        this.recoveryProof(source,request,{fresh:false,record:r.recovery});
+      }
       if(results.some(v=>v.request.resultKey===r.request.resultKey))fail('task_result_history_invalid');results.push(r);
     }
     return results;
@@ -239,7 +251,62 @@ export class TaskResultStore {
         ||!['send_response','create_response','reconciled_observation'].includes(proof.source))fail('task_result_receipt_invalid');
     return true;
   }
-  submit(jobId,request) {
+  recoveryFile(jobId,resultKey) {
+    if(!jobPattern.test(jobId??'')||!keyPattern.test(resultKey??''))fail('task_result_recovery_invalid');
+    return path.join(this.recoveryRoot,this.binding.bot,this.scopeHash,`${digest(jobId)}-${digest(resultKey)}.json`);
+  }
+  recoveryProof(source,value,{fresh=true,record}={}) {
+    for(const dir of [this.recoveryRoot,path.join(this.recoveryRoot,this.binding.bot),path.join(this.recoveryRoot,this.binding.bot,this.scopeHash)])privateDirectory(dir);
+    const proof=json(this.recoveryFile(source.id,value.resultKey),{maxBytes:16384});
+    const fields=['schema','action','reviewed','scopeHash','sourceHash','markerTurnId','blockedCode','blockedAt','requestHash','requestFile','requestFileSha256','reviewedAt'];
+    if(!plain(proof)||Object.keys(proof).length!==fields.length||Object.keys(proof).some(k=>!fields.includes(k))||proof.schema!==1
+        ||proof.action!=='resume_delivery_only'||proof.reviewed!==true||proof.scopeHash!==this.scopeHash||proof.sourceHash!==sourceHash(source)
+        ||typeof source.markerTurnId!=='string'||!source.markerTurnId||proof.markerTurnId!==source.markerTurnId
+        ||proof.blockedCode!=='turn_ended_without_task_result'||!Number.isFinite(proof.blockedAt)||proof.blockedAt<0
+        ||proof.requestHash!==taskResultRequestHash(value)||!/^[a-f0-9]{64}$/.test(proof.requestFileSha256??''))fail('task_result_recovery_invalid');
+    const reviewedAt=Date.parse(proof.reviewedAt),age=this.now()-reviewedAt;
+    if(!Number.isFinite(reviewedAt)||new Date(reviewedAt).toISOString()!==proof.reviewedAt
+        ||fresh&&(age<0||age>15*60*1000))fail('task_result_recovery_expired');
+    const file=proof.requestFile,relative=path.relative(this.binding.cwd,file??'');
+    if(!path.isAbsolute(file??'')||file!==path.resolve(file)
+        ||!relative||relative==='..'||relative.startsWith(`..${path.sep}`)||path.isAbsolute(relative))fail('task_result_recovery_request_invalid');
+    if(fresh) {
+      if(fs.realpathSync(file)!==file)fail('task_result_recovery_request_invalid');
+      const raw=privateRead(file,{mode:0o600,maxBytes:MAX_BYTES});
+      if(fs.lstatSync(file).nlink!==1||digest(raw)!==proof.requestFileSha256
+          ||!same(requestValue(JSON.parse(raw.toString('utf8'))),value))fail('task_result_recovery_request_changed');
+    }
+    const hash=digest(stableJson(proof));
+    if(record&&(!same(record,{proofHash:hash,blockedCode:proof.blockedCode,blockedAt:proof.blockedAt,markerTurnId:proof.markerTurnId})))fail('task_result_recovery_changed');
+    return {proofHash:hash,blockedCode:proof.blockedCode,blockedAt:proof.blockedAt,markerTurnId:proof.markerTurnId};
+  }
+  recover(jobId,request) {
+    const value=requestValue(request),source=this.source(jobId,{active:true}),role=this.role(source);
+    if(source.event.synthetic_callback||role&&role.ownerJobId!==source.id)fail('task_result_recovery_source_invalid');
+    const history=this.history(source),existing=history.find(r=>r.request.resultKey===value.resultKey);
+    if(existing) {
+      if(!existing.recovery||existing.sourceJobId!==source.id||!same(existing.request,value))fail('task_result_recovery_conflict');
+      this.recoveryProof(source,value,{fresh:false,record:existing.recovery});
+      return {...this.output(existing,source.id),queued:true,duplicate:true,delivered:this.receipt(existing)};
+    }
+    if(history.length||source.taskResult||source.replyKey||source.finalDeliveryEvidence||!source.streamKey
+        ||source.taskResultProtocolBlocked!=='turn_ended_without_task_result'||!Number.isFinite(source.taskResultProtocolBlockedAt)
+        ||!['submitted','delivered'].includes(source.status))fail('task_result_recovery_source_invalid');
+    const recovery=this.recoveryProof(source,value);
+    if(recovery.blockedAt!==source.taskResultProtocolBlockedAt)fail('task_result_recovery_changed');
+    this.assertRecoveryDelivery(source,value);
+    return this.#submit(jobId,value,recovery);
+  }
+  assertRecoveryDelivery(source,value) {
+    if(source.taskResult||source.replyKey||source.finalDeliveryEvidence||!source.streamKey)fail('task_result_recovery_source_invalid');
+    const card=json(path.join(this.outboundRoot,this.binding.bot,`card-${digest(source.streamKey)}.json`),{maxBytes:8*1024*1024});
+    if(card.key!==source.streamKey||card.jobId!==source.id||!jobPattern.test(card.messageId??'')||card.final||card.cardClosed||card.blocked||card.finalDelivered||card.taskResult
+        ||card.finalReplyKey||card.finalClosedReplyKey||card.finalDeliveryEvidence||card.deliveryUncertain)fail('task_result_recovery_card_invalid');
+    const receipt=path.join(this.inboxRoot,this.binding.bot,`sent-${digest(`${this.scopeHash}\0${source.id}\0${value.resultKey}`)}.json`);
+    if(fs.existsSync(receipt))fail('task_result_recovery_already_sent');
+  }
+  submit(jobId,request) {return this.#submit(jobId,request,null);}
+  #submit(jobId,request,recovery) {
     const value=requestValue(request),source=this.source(jobId,{active:true});let role=this.role(source);
     if(!role) {
       const action=source.event.synthetic_callback&&!source.event.background_completion?this.actionProof(source,{current:true}):null;
@@ -256,7 +323,7 @@ export class TaskResultStore {
     // A finished original turn cannot author a later answer. Continuations must
     // submit under their own newly accepted reply-chain/callback source.
     if(!['submitted','delivered'].includes(source.status)||source.unclassifiedTurnEnded
-        ||source.taskResultProtocolBlocked==='turn_ended_without_task_result')fail('task_result_submitter_not_active');
+        ||source.taskResultProtocolBlocked==='turn_ended_without_task_result'&&!recovery)fail('task_result_submitter_not_active');
     if(prior) {
       if(!this.receipt(prior))fail('task_result_prior_outstanding');
       const action=role.via==='action'?this.actionProof(source,{current:true}):null;
@@ -268,10 +335,17 @@ export class TaskResultStore {
     if(history.length>=MAX_REVISIONS)fail('task_result_revision_limit');
     const result={schema:1,scopeHash:this.scopeHash,ownerJobId:owner.id,ownerHash:sourceHash(owner),sourceJobId:source.id,sourceHash:sourceHash(source),
       revision:history.length+1,previous:prior?.recordHash??null,request:value,replyKey:digest(`${this.scopeHash}\0${owner.id}\0${value.resultKey}`)};
+    if(recovery)result.recovery={...recovery};
     if(role.via==='action'&&['shorter','sources','table'].includes(source.event.action_type))result.updateKind='answer_revision';
     result.recordHash=digest(stableJson(result));const dir=path.join(this.dir,`results-${digest(owner.id)}`);privateDirectory(dir,{create:true});
     // Re-read authorization and source identity immediately before immutable publication.
     if(sourceHash(this.source(source.id,{active:true}))!==result.sourceHash||sourceHash(this.source(owner.id))!==result.ownerHash)fail('task_result_source_changed');
+    if(recovery) {
+      const latest=this.source(source.id,{active:true});this.recoveryProof(latest,value,{record:recovery});
+      if(latest.taskResultProtocolBlocked!==recovery.blockedCode||latest.taskResultProtocolBlockedAt!==recovery.blockedAt
+          ||latest.streamKey!==source.streamKey||this.history(latest).length)fail('task_result_recovery_changed');
+      this.assertRecoveryDelivery(latest,value);
+    }
     if(role.via==='action')this.actionProof(source,{current:true});
     const file=path.join(dir,`v-${String(result.revision).padStart(6,'0')}.json`);
     if(!this.publish(file,result)) {

@@ -255,13 +255,16 @@ export class DurableInbox {
           && JSON.stringify(p.content ?? []).includes(`[飞书消息｜${this.bot}｜${j.id}]`)) {
         j.markerSeen = true; j.status = 'delivered'; j.deliveredAt ??= this.now();
         if(j.markerTurnId===undefined && observedTurnId!==undefined)j.markerTurnId=observedTurnId;
-        if(perTaskResult(j))this.save(j); // The independent store reads durable marker proof.
+        j.markerPosition??=absoluteEnd;
+        if(perTaskResult(j)||this.io.onMarkerScanned)this.save(j); // Independent consumers read durable marker proof.
+        this.io.onMarkerScanned?.(j);
+        if(this.completeSilently(j))break;
       }
       if (!j.markerSeen) continue;
       if(this.completeSilently(j))break;
       const message = rolloutAssistantMessage(item);
       const observedAt=this.now(), at=eventTime(item,observedAt);
-      if(message || executionActivity(item)) {
+      if(observedTurnId===j.markerTurnId && (message || executionActivity(item))) {
         const activityAt=Math.max(j.lastActivityAt??j.submittedAt,at??observedAt);
         j.lastActivityAt=activityAt;
         if(j.timeoutNotified && activityAt>(j.timeoutNotifiedAt??j.submittedAt+this.timeoutMs)) {
@@ -285,6 +288,11 @@ export class DurableInbox {
       const completion = rolloutTaskCompletion(item);
       if((message?.phase==='final_answer' || completion) && observedTurnId!==j.markerTurnId)continue;
       if(perTaskResult(j) && (message?.phase==='final_answer' || completion)) {
+        // A producer may publish between the watch tick and this source's
+        // completion record. Consume proven requests before applying the old
+        // turn guard; workspace timestamps never authorize a later replay.
+        this.io.onMarkerScanned?.(j);
+        if(this.completeSilently(j))break;
         if(!j.taskResult && !(j.taskResultOwnerJobId && j.taskResultOwnerJobId!==j.id)) {
           j.taskResultProtocolBlocked='turn_ended_without_task_result';j.taskResultProtocolBlockedAt??=this.now();
         }
