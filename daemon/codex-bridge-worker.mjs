@@ -44,6 +44,7 @@ import { DurableReplyRouter, selectReplyRoute } from './codex-bridge-reply-routi
 import { NativeInteractions } from './codex-bridge-native-runtime.mjs';
 import { CloudDocOutbox } from './codex-bridge-cloud-docs.mjs';
 import { hydrateNativeContext } from './codex-bridge-native-context.mjs';
+import { preflightManaged, submitManagedPrompt } from './codex-bridge-app-server.mjs';
 import { UX_PROMPT, bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -527,6 +528,9 @@ async function resolveActivePty(binding) {
   ], { cwd: DAEMON_DIR });
   const resolved = JSON.parse(result.stdout.trim());
   if (resolved.ok !== true) throw new Error(`pty_resolve_failed:${resolved.error ?? 'unknown'}`);
+  if (resolved.transport === 'codex_app_server') {
+    await preflightManaged(config.runtime, binding, resolved, { children: activeChildren });
+  }
   return resolved.active_writer === true ? resolved : null;
 }
 
@@ -553,6 +557,15 @@ async function runPtyTurn(binding, event, prompt, replyPath, pty, onCommentary, 
   const rolloutPath = findRolloutPath(binding.codex_thread_id);
   const startOffset = fs.statSync(rolloutPath).size;
   const safePrompt = prompt.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+  if (pty.transport === 'codex_app_server') {
+    await submitManagedPrompt(config.runtime, binding, pty, safePrompt,
+      event.message_id ?? event.id, { children: activeChildren });
+    if (submitOnly) return;
+    const reply = await waitForRolloutFinal(rolloutPath, startOffset,
+      event.message_id ?? event.id ?? '', onCommentary);
+    atomicWriteText(replyPath, reply);
+    return;
+  }
   const terminalHandle = await resolveOrcaTerminalHandle(pty);
   if (safePrompt.length <= 16000) {
     // This is Orca's supported agent-prompt path. It performs bracketed paste,

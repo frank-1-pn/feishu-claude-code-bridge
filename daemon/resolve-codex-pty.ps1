@@ -96,12 +96,38 @@ if ($writerPids.Count -eq 0) {
     exit 0
 }
 
-$nodePath = (Get-Command node.exe -ErrorAction Stop).Source
-$sessionsResult = & $nodePath $RpcScript --mode list | ConvertFrom-Json
-$sessions = @($sessionsResult.sessions)
 $processes = @(Get-CimInstance Win32_Process)
 $byPid = @{}
 foreach ($process in $processes) { $byPid[[int]$process.ProcessId] = $process }
+
+# New Orca versions share an already running managed app-server. It is the
+# writer, not a descendant of a PTY. Verify identity before returning this route;
+# the worker additionally verifies the exact loaded thread and its bound cwd.
+$daemonPidFile = Join-Path $resolvedHome 'app-server-daemon\daemon.pid'
+if ($writerPids.Count -eq 1 -and (Test-Path -LiteralPath $daemonPidFile -PathType Leaf)) {
+    $daemonRecord = Get-Content -LiteralPath $daemonPidFile -Raw | ConvertFrom-Json
+    $writer = $byPid[[int]$writerPids[0]]
+    if ($writer -and [int]$daemonRecord.pid -eq [int]$writer.ProcessId -and $writer.Name -eq 'codex.exe') {
+        $exe = [string]$writer.ExecutablePath
+        if ($exe.StartsWith('\\?\')) { $exe = $exe.Substring(4) }
+        $exe = [IO.Path]::GetFullPath($exe)
+        $packagePrefix = [IO.Path]::GetFullPath((Join-Path $resolvedHome 'packages\app-server-daemon')) + [IO.Path]::DirectorySeparatorChar
+        $started = (Get-Process -Id ([int]$writer.ProcessId) -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc()
+        if ($exe.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            $writer.CommandLine -match '(?:^|\s)app-server(?:\s|$)' -and
+            $writer.CommandLine -match '(?:^|\s)--managed-daemon(?:\s|$)' -and
+            [string]$started -eq [string]$daemonRecord.processStartTime) {
+            @{ ok = $true; active_writer = $true; transport = 'codex_app_server';
+               thread_id = $ThreadId; writer_pid = [int]$writer.ProcessId;
+               daemon_exe = $exe } | ConvertTo-Json -Compress
+            exit 0
+        }
+    }
+}
+
+$nodePath = (Get-Command node.exe -ErrorAction Stop).Source
+$sessionsResult = & $nodePath $RpcScript --mode list | ConvertFrom-Json
+$sessions = @($sessionsResult.sessions)
 
 $matches = @()
 foreach ($writerPid in $writerPids) {

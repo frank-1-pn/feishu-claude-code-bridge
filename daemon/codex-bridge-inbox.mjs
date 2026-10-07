@@ -89,7 +89,15 @@ export class DurableInbox {
       j.status = 'submitted'; j.submittedAt = this.now();
       this.save(j); // Crash boundary: reconcile rollout, never blindly reinject.
       try { await this.io.inject(j, target); }
-      catch { j.transportUncertain = true; this.save(j); }
+      catch (error) {
+        if (error?.notSubmitted === true) {
+          // A verified pre-write failure or explicit RPC rejection is safe to
+          // retry. Unknown write/response failures stay submitted for reconciliation.
+          j.status = 'queued'; delete j.submittedAt; delete j.cursor; delete j.rollout;
+          recordFailure(j, error, this.now());
+        } else j.transportUncertain = true;
+        this.save(j);
+      }
       return true;
     } catch (error) {
       recordFailure(j, error, this.now());

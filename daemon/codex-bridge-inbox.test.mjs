@@ -54,6 +54,16 @@ test('uncertain submission never blindly retries but accepts late marker',async 
   assert.equal(q.jobs.get('om_a').transportUncertain,true);f.append(marker('a'),answer());await q.watch();await q.deliverReplies();
   assert.equal(q.stats().completed_count,1);
 });
+test('proven pre-write rejection returns to durable queue with backoff, then succeeds once',async t=>{
+  let attempts=0;
+  const f=fixture(t,{inject:async()=>{if(++attempts===1)throw Object.assign(Error('explicit rejection'),{notSubmitted:true});}});
+  const j=f.q.enqueue(event('rejected'));await f.q.dispatchOne();
+  assert.equal(j.status,'queued');assert.equal(j.submittedAt,undefined);assert.equal(j.cursor,undefined);
+  const q=f.open();await q.dispatchOne();assert.equal(attempts,1);
+  f.setNow(20000);await q.dispatchOne();assert.equal(attempts,2);
+  f.append(marker('rejected'),answer('accepted'));await q.watch();await q.deliverReplies();
+  assert.equal(q.stats().completed_count,1);assert.equal(f.sent.length,1);
+});
 test('permanent attachment failure is reported and unblocks subsequent text',async t=>{
   const f=fixture(t,{prepare:async e=>{if(e.message_type==='image')throw Object.assign(Error('download'),{permanent:true});return e;}});
   f.q.enqueue(event('a','image'));f.q.enqueue(event('b'));await f.q.dispatchOne();await f.q.dispatchOne();
