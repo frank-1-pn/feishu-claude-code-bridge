@@ -1,13 +1,19 @@
 # 飞书 Codex bridge：配置与新会话接手
 
-本指南适用于 Windows + Orca/Codex 的现有 bridge。只有用户要求连接、排查或配置，或当前会话已获授权绑定时，才操作运行时。新会话仅阅读文档不需要连接、改绑或启动服务。
+本指南的现有运行目录、私有绑定与安全接手规则适用于 Windows/macOS + Orca/Codex；下文 PowerShell 配置命令属于 Windows，macOS 入口见统一发布指南。只有用户要求连接、排查或配置，或当前会话已获授权绑定时，才操作运行时。新会话仅阅读文档不需要连接、改绑或启动服务。
 
 ## 代码与运行目录
 
-- 仓库：[frank-1-pn/feishu-claude-code-bridge](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/feat/feishu-ux-20260927)。当前 Codex 维护分支是 `feat/feishu-ux-20260927`；`main` 保留旧 Claude 实现，不能照旧 Monitor/PID 流程配置 Codex。
+- 仓库：[frank-1-pn/feishu-claude-code-bridge](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/stable/codex)。Codex 统一发布入口是 `stable/codex`；`main` 保留旧 Claude 实现，feature 分支只作开发历史。部署必须选实际已发布且通过测试的完整 commit，不能自动跟随最新分支；分支名本身不证明已发布。版本清单与双平台入口见[统一发布与只读安装核对](https://github.com/frank-1-pn/feishu-claude-code-bridge/blob/stable/codex/docs/runtime-release.md)。
 - 运行目录：`Join-Path $env:USERPROFILE '.lark-cli\daemon'`。worker 从这里加载模块与私有配置，不直接运行任意 Git worktree 里的新代码。
 - 技能安装目录：**当前生效的** Codex home 下的 `skills/feishu-bot-runtime/`。先核对 `$env:CODEX_HOME`、当前 Orca 运行环境和绑定配置的 `runtime.codex_home`；托管安装不一定使用 `~/.codex`。有冲突时先核对目标会话，不能换一个 home 来绕过 writer lock。
 - 代码版本、文档版本和运行进程版本分别核对。2026-09-30 的核对记录见[版本记录](https://github.com/frank-1-pn/feishu-claude-code-bridge/blob/feat/feishu-ux-20260927/docs/feishu-runtime-sync-20260930.md)；它是历史快照，之后使用仍需现场复核。
+
+### 固定版本与外部发布清单
+
+`releases/codex-runtime-v1.json` 是受版本管理的安装文件白名单和双平台 pinned subscriber 源码约束；它不记录自身 commit/tree。唯一发布者在干净、已提交且通过测试的精确 ref 上运行 `scripts/bridge-release.mjs generate`，把完整 SHA256 manifest 存在仓库外的持久发布目录。`verify` 与 `check-installed` 都要求从可信发布记录独立取得完整 ref，并重新从该 ref 生成比较；不能只信清单自报 hash。
+
+`check-installed` 只读取清单中的 runtime/生效技能文件，可单独指定 `--area runtime` 或 `--area skill`。它不读取绑定、state、日志、凭据、未知运行文件，不改任何文件，不启动订阅/worker/model turn，也不证明已运行进程采用了新版本。未知文件保留；全局 AGENTS 仍只合并规则，原绑定、writer、offset、订阅专用 binary 与 build manifest 保持原样。发布、测试、安装 hash、实际进程版本、真人入站和最终送达分别记证据；未验收明确写待验收。
 
 ## 本机另一 Codex session 如何接手
 
@@ -101,7 +107,7 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 
 ## 可直接交给另一 session 的说明
 
-> 请从 `feat/feishu-ux-20260927` 的 `AGENTS.md`、`feishu-bot-runtime` skill 与本指南接手。先区分代码 checkout、已安装文件和常驻进程版本。当前 bot/thread/profile 从本机私有配置读取，复用已有 daemon，不另开订阅；仅维护文档不改绑、不重启。需要配置时先确认目标 thread、备份和校验，等 coding 及各投递队列完成再由唯一部署者重载。保留 Bot1 知识库、coding 项目附件、ASR 关闭的当前选择；配置、密钥、私有消息和原始附件不上传 Git。完成报告区分已提交、已推送、已安装与真实收发验收。
+> 请从 `stable/codex` 对应实际发布的固定 tested commit 的 `AGENTS.md`、`feishu-bot-runtime` skill 与本指南接手。先区分代码 checkout、已安装文件和常驻进程版本。当前 bot/thread/profile 从本机私有配置读取，复用已有 daemon，不另开订阅；仅维护文档不改绑、不重启。需要配置时先确认目标 thread、备份和校验，等 coding 及各投递队列完成再由唯一部署者重载。保留 Bot1 知识库、coding 项目附件、ASR 关闭的当前选择；配置、密钥、私有消息和原始附件不上传 Git。完成报告区分已提交、已推送、已安装与真实收发验收。
 
 ### 只读预取配置边界
 

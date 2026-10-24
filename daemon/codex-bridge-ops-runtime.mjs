@@ -166,11 +166,11 @@ export class OpsRuntime {
     const record=records.find(r=>this.controls.valid(r)&&r.contextId===contextId);
     if(!record)throw failure('ops_delivery_context_owner_missing');return this.controls.bindCard(contextId,messageId);
   }
-  async controlsTick() {
-    this.refresh();if(!this.policy.enabled||!this.policy.taskControls||!this.controls||!this.delivery)return this.stats();
+  async controlsTick({includeStats=true}={}) {
+    this.refresh();if(!this.policy.enabled||!this.policy.taskControls||!this.controls||!this.delivery)return includeStats?this.stats():undefined;
     try {await this.controls.drain((text,key,context)=>this.delivery.send(text,key,{...context,ownerKind:'control',ownerId:digest(context.receiptId),
       cardMarker:context.contextId??'后台任务',onMessage:(c,m)=>this.bindCard(c,m)}));this.errors.control=0;}catch{this.errors.control=1;}
-    return this.stats();
+    return includeStats?this.stats():undefined;
   }
   async backgroundProjection() {
     try {
@@ -205,9 +205,9 @@ export class OpsRuntime {
       });
     }catch{return undefined;}
   }
-  async monitorTick() {
+  async monitorTick({includeStats=true}={}) {
     this.refresh();if(!this.policy.enabled||!this.policy.monitoring||!this.monitor||!this.delivery
-      ||this.monitorMetricsConfig!==this.desiredMonitorMetricsConfig)return this.stats();
+      ||this.monitorMetricsConfig!==this.desiredMonitorMetricsConfig)return includeStats?this.stats():undefined;
     try {
       const results=await Promise.allSettled([Promise.resolve().then(()=>this.jobs()),this.backgroundProjection(),
         Promise.resolve().then(()=>this.getBackgroundStats?.()),Promise.resolve().then(()=>typeof this.health==='function'?this.health():this.health??readOpsHealth({daemonDir:this.daemonDir,binding:this.binding,now:this.now()}))]);
@@ -227,10 +227,10 @@ export class OpsRuntime {
       }
       this.errors.alert=0;
     }catch{this.errors.alert=1;}
-    return this.stats();
+    return includeStats?this.stats():undefined;
   }
-  async deliveryTick() {
-    this.refresh();if(!this.policy.enabled||!this.delivery)return this.stats();
+  async deliveryTick({includeStats=true}={}) {
+    this.refresh();if(!this.policy.enabled||!this.delivery)return includeStats?this.stats():undefined;
     try {
       await this.delivery.reconcile({onMessage:(c,m)=>this.bindCard(c,m),onVerified:state=>{
         if(state.ownerKind==='control' && this.controls) {
@@ -246,7 +246,7 @@ export class OpsRuntime {
         }else throw failure('ops_delivery_owner_missing');
       }});this.errors.delivery=0;
     }catch{this.errors.delivery=1;}
-    return this.stats();
+    return includeStats?this.stats():undefined;
   }
   stats() {
     this.refresh();const out=zeros();out.ops_policy_blocked_count=this.policy.reason?1:0;

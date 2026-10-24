@@ -3,8 +3,10 @@
 ## Start here
 
 This repository contains both the original Claude integration and the Windows
-Codex bridge. For Codex, use `feat/feishu-ux-20260927`, not the legacy setup on
-`main`. Read [the runtime skill](codex-config/skills/feishu-bot-runtime/SKILL.md)
+Codex bridge. The Codex publication entry is `stable/codex`; `main` retains the
+legacy Claude setup. Select an exact tested, published commit and its external
+release manifest; feature branches and a moving branch tip are not deployment
+authority. Read [runtime releases](docs/runtime-release.md), then [the runtime skill](codex-config/skills/feishu-bot-runtime/SKILL.md)
 and its [configuration and handoff guide](codex-config/skills/feishu-bot-runtime/references/configuration-and-handoff.md)
 before an authorized connection, configuration or recovery task.
 
@@ -27,6 +29,11 @@ of those operations.
   fixed, tested and pushed revision. Wait for active Codex work and every
   delivery queue to finish; process presence or `bridge.state=idle` alone is
   insufficient. Never interrupt coding to reload documentation.
+- Keep publication, source tests, installed hash checks and real human acceptance
+  as separate evidence. `scripts/bridge-release.mjs` only reads source/declared
+  installation files; it cannot install, start services or validate a live bot.
+  Keep generated manifests outside the checkout; the tracked release profile
+  contains paths/dependency constraints, never its own commit/tree hashes.
 - Validate according to the change. For runtime changes, run the relevant
   `node --test` suites and prove real ingress into the intended thread plus
   final delivery. For documentation, check examples, links and private-data

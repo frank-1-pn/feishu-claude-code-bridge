@@ -2,13 +2,23 @@
 
 ## Current Codex runtime instructions
 
-**Windows Codex users:** the maintained runtime is on
-[`feat/feishu-ux-20260927`](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/feat/feishu-ux-20260927).
-The default `main` branch retains the original Claude implementation.
-Start with the Chinese [configuration and session handoff guide](codex-config/skills/feishu-bot-runtime/references/configuration-and-handoff.md)
-and the [2026-09-30 runtime/GitHub comparison](docs/feishu-runtime-sync-20260930.md).
-The guide separates reusing an existing host from preparing a new machine;
-cloning this repository alone is not a complete Windows installation.
+**Windows and macOS Codex users:** the stable publication entry is
+[`stable/codex`](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/stable/codex).
+Keep `main` for the original Claude integration. Feature branches are development
+history; deployments select the exact tested commit from a published Codex release,
+never whichever branch is newest. A branch name alone does not prove a release exists.
+
+Start with [runtime releases and read-only installation checks](docs/runtime-release.md)
+and the Chinese [configuration and session handoff guide](codex-config/skills/feishu-bot-runtime/references/configuration-and-handoff.md).
+The release profile covers the current Codex daemon modules and skill files on both
+platforms. Windows uses the PowerShell/watchdog entry points; macOS uses the current
+`daemon/macos-service.mjs`/watchdog entry points. The older `macos/` directory below
+belongs to the original Claude integration. Cloning alone does not install a runtime.
+
+Publication, tests, installed file integrity and real human message acceptance are
+separate evidence. The release tool only generates/verifies an external manifest or
+reads explicitly selected installed files. It never installs, starts a subscriber,
+restarts a worker or submits a model turn.
 
 The Windows Codex bridge uses the existing Feishu daemon and durable inbox.
 Its maintained instruction bundle is under [`codex-config/`](codex-config/):

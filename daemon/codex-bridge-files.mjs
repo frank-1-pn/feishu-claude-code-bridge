@@ -4,6 +4,7 @@ import { digest } from './codex-bridge-inbox.mjs';
 import { atomicWriteJson } from './codex-bridge-storage.mjs';
 import { recordFailure } from './codex-bridge-retry.mjs';
 import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
+import { isHistoricalFileFailure } from './codex-bridge-file-history.mjs';
 
 const permanent = code => Object.assign(new Error(code), { code, permanent: true });
 export function within(root, file) {
@@ -121,20 +122,30 @@ export function getReportDelivery({ root, binding, artifacts }) {
 }
 
 export class FileOutbox {
-  constructor(root, binding, request, { now = Date.now, notify, getRoute } = {}) {
+  constructor(root, binding, request, { now = Date.now, notify, getRoute, resolveHistoricalSource } = {}) {
     this.root = path.join(root, binding.bot); this.binding = binding; this.request = request; this.now = now;
-    this.notify = notify;this.getRoute=getRoute;
+    this.notify = notify;this.getRoute=getRoute;this.resolveHistoricalSource=resolveHistoricalSource;
+    this.historicalPayloadDigests=new Map();
     fs.mkdirSync(this.root, { recursive: true });
   }
   records() {
-    return fs.readdirSync(this.root).filter(n => /^[a-f0-9]{64}$/.test(n)).map(n => path.join(this.root, n, 'request.json'))
-      .filter(f => fs.existsSync(f)).map(file => ({ file, s: JSON.parse(fs.readFileSync(file)) }))
-      .sort((a, b) => a.s.createdAt - b.s.createdAt);
+    return fs.readdirSync(this.root).filter(n => /^[a-f0-9]{64}$/.test(n)).map(key => {
+      const file=path.join(this.root,key,'request.json');
+      try {
+        if(!fs.lstatSync(path.dirname(file)).isDirectory() || !fs.lstatSync(file).isFile())throw Error('invalid_file_record');
+        const s=JSON.parse(fs.readFileSync(file));
+        if(!s || typeof s!=='object' || Array.isArray(s))throw Error('invalid_file_record');
+        return {file,key,s};
+      } catch {return {file,key,s:null,readError:true};}
+    }).sort((a, b) => (a.s?.createdAt??0) - (b.s?.createdAt??0));
   }
   stats() {
-    const states = this.records().map(x => x.s);
-    return { file_pending_count: states.filter(s => s.status === 'queued').length,
-      file_failed_count: states.filter(s => s.status === 'blocked').length };
+    const records=this.records(),failed=records.filter(({s})=>!s || !['queued','done'].includes(s.status));
+    const historical=failed.filter(({s,key,file})=>isHistoricalFileFailure({state:s,key,dir:path.dirname(file),binding:this.binding,
+      now:this.now(),resolveSource:this.resolveHistoricalSource,payloadDigestCache:this.historicalPayloadDigests})).length;
+    return { file_pending_count: records.filter(({s}) => s?.status === 'queued').length,
+      file_failed_count: failed.length, file_active_failed_count: failed.length-historical,
+      file_historical_failed_count: historical };
   }
   flush() {
     // Final reply delivery and the periodic worker can request a flush together.
@@ -145,6 +156,7 @@ export class FileOutbox {
   }
   async flushOnce() {
     for (const { file, s } of this.records()) {
+      if(!s)continue; // Corrupt/missing records remain active diagnostics, untouched.
       if(s.status==='blocked' && !s.noticeSent && this.notify) {
         const noticeFile = s.generatedReport ? path.join(this.root, `report-notice-${s.generatedReport}.json`) : null;
         if (noticeFile && fs.existsSync(noticeFile)) { s.noticeSent = true; atomicWriteJson(file,s); continue; }

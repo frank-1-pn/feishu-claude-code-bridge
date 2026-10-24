@@ -36,6 +36,7 @@ import { sanitizeFeishuReply } from './codex-bridge-sanitize.mjs';
 import { DurableInbox, digest, suppressUnclassifiedNotice } from './codex-bridge-inbox.mjs';
 import { prepareInbound } from './codex-bridge-media.mjs';
 import { atomicWriteJson, atomicWriteText, createStatusPublisher } from './codex-bridge-storage.mjs';
+import { syncReceiptDiagnostic } from './codex-bridge-idle.mjs';
 import { createLarkTransport, resolveLarkAppId } from './codex-bridge-lark.mjs';
 import { DurableReactions } from './codex-bridge-reactions.mjs';
 import { classifyWithFastFeedback } from './codex-bridge-fast-feedback.mjs';
@@ -56,6 +57,7 @@ import {WakeSignal,EventFileWakeup} from './codex-bridge-wakeup.mjs';
 import {createOpsRuntime,stripExternalOpsFields} from './codex-bridge-ops-runtime.mjs';
 import {TaskResultStore} from './codex-bridge-task-results.mjs';
 import {AgentRequestDispatcher} from './codex-bridge-agent-requests.mjs';
+import {readBackgroundJson} from './codex-bridge-background-store.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -1169,7 +1171,12 @@ async function durableBotLoops(binding) {
       if(!await outbound.attachCloudDoc(record.replyKey,record))await outbound.text(text,key,getRoute(record.jobId));
     }});
   const files = new FileOutbox(path.join(DAEMON_DIR, 'state', 'file-outbox'), binding,
-    (...args) => outbound.serial(() => lark(...args)), {getRoute,notify:(text,key,jobId)=>outbound.text(text,key,getRoute(jobId))});
+    (...args) => outbound.serial(() => lark(...args)), {getRoute,notify:(text,key,jobId)=>outbound.text(text,key,getRoute(jobId)),
+      resolveHistoricalSource:jobId=>{
+        const file=path.join(INBOX_ROOT,binding.bot,`job-${digest(jobId)}.json`);
+        if(fs.lstatSync(file).nlink!==1)return null;
+        return readBackgroundJson(file,{mode:0o600,maxBytes:512*1024});
+      }});
   const backgroundRoot=path.join(DAEMON_DIR,'state','background-v1');
   const taskResults=binding.group_access==='all_group_humans'?new TaskResultStore({root:path.join(DAEMON_DIR,'state','task-results-v1'),
     inboxRoot:INBOX_ROOT,completionRoot:path.join(DAEMON_DIR,'state','completions-v1'),binding,codexHome:config.runtime.codex_home,backgroundRoot}):null;
@@ -1354,7 +1361,7 @@ async function durableBotLoops(binding) {
       inbox.save(j);
     }
     // This is an intake/receipt diagnostic cursor, not proof of model delivery.
-    atomicWriteText(binding.receiptOffsetPath,String(readOffset(binding)??0));
+    syncReceiptDiagnostic(binding,{readOffset});
   };
   const watch = async () => {
     agentRequests?.drain();
@@ -1381,7 +1388,7 @@ async function durableBotLoops(binding) {
       agent_request_transport:agentRequests?'workspace_spool_v1':null,agent_request_runtime_enabled:!!agentRequests,
       voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
-      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked||backgroundStats.background_blocked_count||backgroundStats.background_admission_blocked_count
+      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||(fileStats.file_active_failed_count??fileStats.file_failed_count)||actionDrain.blocked||backgroundStats.background_blocked_count||backgroundStats.background_admission_blocked_count
         ||opsStats.ops_policy_blocked_count||opsStats.ops_control_blocked_count||opsStats.ops_alert_blocked_count||opsStats.ops_delivery_blocked_count
         ||opsStats.collaboration_operation_blocked_count||opsStats.collaboration_policy_blocked_count||opsStats.metrics_policy_blocked_count||opsStats.research_policy_blocked_count
         ||taskStats.task_result_blocked_count||stats.task_result_protocol_blocked_count||agentStats.agent_request_blocked_count?'degraded':busy?'processing':'idle',
@@ -1396,8 +1403,8 @@ async function durableBotLoops(binding) {
     loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),
     loop('reactions',()=>reactions?.flush(),1000),
     loop('background',()=>background.tick(),1000),
-    loop('ops-controls',()=>ops.controlsTick(),500),loop('ops-monitor',()=>ops.monitorTick(),5000),
-    loop('ops-delivery',()=>ops.deliveryTick(),5000),
+    loop('ops-controls',()=>ops.controlsTick({includeStats:false}),500),loop('ops-monitor',()=>ops.monitorTick({includeStats:false}),5000),
+    loop('ops-delivery',()=>ops.deliveryTick({includeStats:false}),5000),
     loop('performance',()=>performance.observe(binding.bot,inbox.jobs.values()),1000)]);
   } finally {for(const resource of resources){resource.close();runtimeResources.delete(resource);}}
 }

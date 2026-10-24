@@ -54,6 +54,17 @@ function fixture(t,{policy=true}={}) {
     get ops(){return ops;},counts:()=>({creates,reads,sourceReads}),advance:ms=>time+=ms};
 }
 
+test('worker maintenance avoids unused diagnostic scans but still handles controls and fresh policy revocation',async t=>{
+  const f=fixture(t),job=f.add('查一下进度');await f.ops.acceptHuman(job);
+  const original=f.ops.stats.bind(f.ops);let scans=0;f.ops.stats=()=>{scans++;return original();};
+  await f.ops.controlsTick({includeStats:false});assert.equal(f.counts().creates,1);
+  await f.ops.monitorTick({includeStats:false});await f.ops.deliveryTick({includeStats:false});assert.equal(scans,0);
+  const after=await f.ops.controlsTick();assert.equal(scans,1);assert.equal(typeof after.ops_control_pending_count,'number');
+  f.enable({enabled:false});const next=f.add('查一下进度','om_after_revoke');assert.equal((await f.ops.acceptHuman(next)).accepted,false);
+  const creates=f.counts().creates;await f.ops.controlsTick({includeStats:false});await f.ops.deliveryTick({includeStats:false});
+  assert.equal(f.counts().creates,creates);assert.equal(scans,1);
+});
+
 test('fresh absent policy disables all feature work without state creation or bridge interference',async t=>{
   const f=fixture(t,{policy:false}),job=f.add('现在有哪些任务');
   assert.equal((await f.ops.acceptHuman(job)).accepted,false);await f.ops.controlsTick();await f.ops.monitorTick();await f.ops.deliveryTick();
