@@ -5,6 +5,35 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 const win = process.platform === 'win32';
+test('bounded SDK reconnect grace never accumulates outage alerts; cooldown still records fresh probes', {skip:!win}, t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'watchdog-grace-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  fs.copyFileSync(new URL('./invoke-bounded-script.ps1',import.meta.url),path.join(dir,'invoke-bounded-script.ps1'));
+  const source=fs.readFileSync(new URL('./feishu-watchdog.ps1',import.meta.url),'utf8');
+  const script=path.join(dir,'feishu-watchdog.ps1');
+  fs.writeFileSync(script,source.replace("'Global\\LarkCodexWatchdog-v2'",`'Local\\GraceTest-${process.pid}'`));
+  fs.writeFileSync(path.join(dir,'codex-thread-bindings.json'),JSON.stringify({bindings:{fixture:{}}}));
+  fs.mkdirSync(path.join(dir,'state'));
+  const stateFile=path.join(dir,'state/watchdog.json');
+  fs.writeFileSync(stateFile,JSON.stringify({checked_at:'old',consecutive_failures:2,next_retry_at:Date.now()/1000+600}));
+  const probe=path.join(dir,'status-codex-bridge.ps1');
+  fs.writeFileSync(probe,"@{healthy=$true;transport_healthy=$false;delivery_healthy=$false;bridge=@{exact_identity=$true;heartbeat_fresh=$true};bots=@(@{bot='fixture';daemon_healthy=$true;socket_verified=$false;socket_signal='reconnecting'})}|ConvertTo-Json -Depth 4");
+  assert.throws(()=>execFileSync('powershell.exe',['-NoProfile','-File',script,'-NoAlert'],{timeout:15000,windowsHide:true}),{status:1});
+  let state=JSON.parse(fs.readFileSync(stateFile));
+  assert.equal(state.healthy,false); // Never invent transport proof.
+  assert.equal(state.recovering,true);
+  assert.equal(state.consecutive_failures,0);
+  assert.equal(state.next_retry_at,0);
+  assert.ok(state.reasons.some(s=>s.includes('fixture:reconnecting')));
+  fs.writeFileSync(stateFile,JSON.stringify({checked_at:'old',consecutive_failures:3,next_retry_at:Date.now()/1000+600}));
+  fs.writeFileSync(probe,"@{healthy=$false;transport_healthy=$false;bridge=@{exact_identity=$true;heartbeat_fresh=$true};bots=@(@{bot='fixture';daemon_healthy=$false;socket_verified=$false;socket_signal='pong_timeout'})}|ConvertTo-Json -Depth 4;exit 1");
+  assert.throws(()=>execFileSync('powershell.exe',['-NoProfile','-File',script,'-NoAlert'],{timeout:15000,windowsHide:true}),{status:1});
+  state=JSON.parse(fs.readFileSync(stateFile));
+  assert.notEqual(state.checked_at,'old');
+  assert.equal(state.cooldown,true);
+  assert.equal(state.consecutive_failures,3);
+  assert.ok(state.reasons.some(s=>s.includes('pong_timeout')));
+});
 test('supervisor recovers the probe/recovery race and does not restart healthy subscribers', { skip: !win }, t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-watchdog-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
