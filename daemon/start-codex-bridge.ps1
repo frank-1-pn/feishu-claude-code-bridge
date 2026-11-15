@@ -109,6 +109,13 @@ try {
     & $NodePath $WorkerPath --bindings $BindingsPath --check-config | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "bridge config validation failed (exit=$LASTEXITCODE)" }
 
+    # Check all writers before trusting the advertised PID. A second worker
+    # can overwrite the first one's heartbeat even while both are alive.
+    $exactWorkers = @(Get-ExactWorkerProcesses)
+    if ($exactWorkers.Count -gt 1) {
+        throw "multiple exact bridge workers found; refusing an ambiguous restart: $($exactWorkers.ProcessId -join ',')"
+    }
+
     $record = Read-JsonFile -Path $PidPath
     $process = $null
     if ($record -and $record.pid) {
@@ -130,8 +137,10 @@ try {
     # worker, bindings, and per-launch instance token is eligible.
     if (Test-ExactBridgeProcess $process $record) {
         Write-Host "[codex bridge] exact worker heartbeat stale; restarting PID=$($record.pid)"
-        Stop-Process -Id ([int]$record.pid) -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+        # Never erase identity/lock after a denied or incomplete termination.
+        Stop-Process -Id ([int]$record.pid) -Force -ErrorAction Stop
+        $survivor = Get-Process -Id ([int]$record.pid) -ErrorAction SilentlyContinue
+        if ($survivor) { Wait-Process -Id ([int]$record.pid) -Timeout 5 -ErrorAction Stop }
     } else {
         $exactWorkers = Get-ExactWorkerProcesses
         if ($exactWorkers.Count -gt 1) {
@@ -144,6 +153,7 @@ try {
         }
     }
 
+    if (@(Get-ExactWorkerProcesses).Count -gt 0) { throw 'bridge worker still exists; refusing to remove live identity or start another writer' }
     Remove-StaleBridgeState
     $instance = [guid]::NewGuid().ToString()
     $argumentList = @(

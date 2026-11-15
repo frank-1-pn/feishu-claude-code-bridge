@@ -65,6 +65,10 @@ if ($pidRecord -and $pidRecord.pid) {
     $bridgeProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$pidRecord.pid)" -ErrorAction SilentlyContinue
 }
 $identityOk = Test-ExactBridgeProcess $bridgeProcess $pidRecord
+$exactWorkers = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    (Test-CommandLineToken $_.CommandLine $WorkerPath) -and (Test-CommandLineToken $_.CommandLine $BindingsPath)
+})
+$identityOk = [bool]($identityOk -and $exactWorkers.Count -eq 1)
 $heartbeatAge = $null
 $heartbeatFresh = $false
 if ($workerStatus -and $pidRecord -and
@@ -169,6 +173,7 @@ $report = [ordered]@{
     health_scope = 'healthy permits bounded startup/reconnect grace for supervisor; transport_healthy requires real pong on every socket; delivery_healthy adds queue checks; model ingress still requires rollout evidence'
     checked_at = [DateTimeOffset]::UtcNow.ToString('o')
     bridge = [ordered]@{
+        worker_count = $exactWorkers.Count
         pid = if ($pidRecord) { $pidRecord.pid } else { $null }
         instance = if ($pidRecord) { $pidRecord.instance } else { $null }
         exact_identity = [bool]$identityOk

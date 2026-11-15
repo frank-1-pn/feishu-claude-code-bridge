@@ -71,6 +71,7 @@ try {
     if (-not $check.Data) { $reasons += 'status_probe_unavailable' }
     else {
         if (-not $check.Data.bridge.exact_identity) { $reasons += 'bridge_identity_invalid' }
+        if ($check.Data.bridge.worker_count -gt 1) { $reasons += 'bridge_multiple_writers' }
         if (-not $check.Data.bridge.heartbeat_fresh) { $reasons += 'bridge_heartbeat_stale' }
         foreach ($bot in $check.Data.bots) {
             if (-not $bot.daemon_healthy -or ($hasSocketProbe -and -not $bot.socket_verified)) { $reasons += "$($bot.bot):$($bot.socket_signal)" }
