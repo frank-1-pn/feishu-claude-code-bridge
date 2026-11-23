@@ -106,6 +106,9 @@ if ($bindings -and $bindings.bindings) {
         $botReports += [ordered]@{
             bot = $bot
             daemon_pid = if ($daemonPid) { $daemonPid } else { $null }
+            subscriber_started_at_ms = if ($daemonProcess -and $daemonProcess.CreationDate) {
+                ([DateTimeOffset]$daemonProcess.CreationDate).ToUnixTimeMilliseconds()
+            } else { $null }
             daemon_healthy = [bool]((Test-Subscriber $daemonProcess ([string]$binding.profile)) -and -not $socket.needs_restart -and $socketSignal -ne 'reconnect_exhausted')
             socket_signal = $socket.signal
             socket_verified = $socket.verified
@@ -132,6 +135,11 @@ if ($bindings -and $bindings.bindings) {
             outbound_blocked_count = if ($botState) { $botState.outbound_blocked_count } else { $null }
             file_pending_count = if ($botState) { $botState.file_pending_count } else { $null }
             file_failed_count = if ($botState) { $botState.file_failed_count } else { $null }
+            file_active_failed_count = if ($botState -and $null -ne $botState.file_active_failed_count) { $botState.file_active_failed_count } elseif ($botState) { $botState.file_failed_count } else { $null }
+            file_historical_unresolved_count = if ($botState) { $botState.file_historical_unresolved_count } else { $null }
+            file_report_update_pending_count = if ($botState) { $botState.file_report_update_pending_count } else { $null }
+            file_report_update_blocked_count = if ($botState) { $botState.file_report_update_blocked_count } else { $null }
+            history_recovery = if ($botState) { $botState.history_recovery } else { $null }
             action_accepted_count = if ($botState) { $botState.action_accepted_count } else { $null }
             action_pending_count = if ($botState) { $botState.action_pending_count } else { $null }
             action_blocked_count = if ($botState) { $botState.action_blocked_count } else { $null }
@@ -168,7 +176,7 @@ $report = [ordered]@{
     healthy = $healthy
     transport_healthy = $transportHealthy
     feedback_healthy = [bool](@($botReports | Where-Object { $_.reaction_blocked_count -gt 0 -or $_.reaction_error_count -gt 0 }).Count -eq 0)
-    delivery_healthy = [bool]($transportHealthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 -or $_.watch_error_count -gt 0 -or $_.outbound_blocked_count -gt 0 -or $_.file_failed_count -gt 0 -or $_.action_blocked_count -gt 0 }).Count -eq 0)
+    delivery_healthy = [bool]($transportHealthy -and @($botReports | Where-Object { $_.delivery_stalled -or $_.failed_count -gt 0 -or $_.watch_error_count -gt 0 -or $_.outbound_blocked_count -gt 0 -or $_.file_active_failed_count -gt 0 -or $_.file_report_update_blocked_count -gt 0 -or $_.action_blocked_count -gt 0 }).Count -eq 0)
     socket_health_scope = 'PID/profile/start-time matched SDK pong; unanswered ping 30s, stale pong 2x server interval+30s, reconnect grace 60s; supervisor polls each minute'
     health_scope = 'healthy permits bounded startup/reconnect grace for supervisor; transport_healthy requires real pong on every socket; delivery_healthy adds queue checks; model ingress still requires rollout evidence'
     checked_at = [DateTimeOffset]::UtcNow.ToString('o')

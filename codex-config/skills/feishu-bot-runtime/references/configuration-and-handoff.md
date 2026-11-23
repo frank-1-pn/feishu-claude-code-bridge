@@ -4,7 +4,7 @@
 
 ## 代码与运行目录
 
-- 仓库：[frank-1-pn/feishu-claude-code-bridge](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/feat/feishu-ux-20260927)。当前 Codex 维护分支是 `feat/feishu-ux-20260927`；`main` 保留旧 Claude 实现，不能照旧 Monitor/PID 流程配置 Codex。
+- 仓库：[frank-1-pn/feishu-claude-code-bridge](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/stable/windows-codex)。本机 Windows 托管版从 `stable/windows-codex` 选择固定提交，部署前按[发布说明](https://github.com/frank-1-pn/feishu-claude-code-bridge/blob/stable/windows-codex/docs/windows-codex-release.md)核对清单。另有兼容分支 `stable/codex`，其桌面传输与本机不同。旧 Claude 实现在 `main`。
 - 运行目录：`Join-Path $env:USERPROFILE '.lark-cli\daemon'`。worker 从这里加载模块与私有配置，不直接运行任意 Git worktree 里的新代码。
 - 技能安装目录：**当前生效的** Codex home 下的 `skills/feishu-bot-runtime/`。先核对 `$env:CODEX_HOME`、当前 Orca 运行环境和绑定配置的 `runtime.codex_home`；托管安装不一定使用 `~/.codex`。有冲突时先核对目标会话，不能换一个 home 来绕过 writer lock。
 - 代码版本、文档版本和运行进程版本分别核对。2026-09-30 的核对记录见[版本记录](https://github.com/frank-1-pn/feishu-claude-code-bridge/blob/feat/feishu-ux-20260927/docs/feishu-runtime-sync-20260930.md)；它是历史快照，之后使用仍需现场复核。
@@ -68,6 +68,7 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 | `cardkit_enabled` | 缺省启用；公开进度快照至少间隔 2 秒，非逐 token 输出；已关闭流式卡片自动转同卡整卡更新 |
 | `reaction_feedback` | 缺省启用；原消息表情表示已接收、处理中、答复送达，不等于任务业务验收 |
 | `voice_enabled` | 只有显式 `true` 才启用；当前用户选择保留入口但不开通 ASR，保持 `false` |
+| `history_recovery_mode` | 默认 `audit`，对账并统计近期缺失。单 Bot 验证后可设 `replay` 补入符合条件的纯文本，或设 `off` 关闭 |
 | `cloud_docs.enabled` | 缺省启用报告云文档能力；设 `false` 关闭。权限或创建失败需按交付状态反馈 |
 | `document_organization` | 模板显式设 `version:1, enabled:true, bare_file_action:"organize"`。Bot1 默认 `vault`，coding 默认 `project`；单次明确去向优先 |
 
@@ -97,4 +98,4 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 
 ## 可直接交给另一 session 的说明
 
-> 请从 `feat/feishu-ux-20260927` 的 `AGENTS.md`、`feishu-bot-runtime` skill 与本指南接手。先区分代码 checkout、已安装文件和常驻进程版本。当前 bot/thread/profile 从本机私有配置读取，复用已有 daemon，不另开订阅；仅维护文档不改绑、不重启。需要配置时先确认目标 thread、备份和校验，等 coding 及各投递队列完成再由唯一部署者重载。保留 Bot1 知识库、coding 项目附件、ASR 关闭的当前选择；配置、密钥、私有消息和原始附件不上传 Git。完成报告区分已提交、已推送、已安装与真实收发验收。
+> 从固定 Windows release revision 的 `AGENTS.md`、`feishu-bot-runtime` skill 与本指南接手。查看实际安装清单和常驻进程版本，再按本机私有配置复用现有 bot/thread/profile。配置变更前备份并校验，等 coding 和各投递队列完成后重载。保留 Bot1 知识库、coding 项目附件及 ASR 关闭的现有选择。配置、密钥、私有消息和原始附件留在本机。

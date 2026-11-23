@@ -3,8 +3,9 @@
 ## Start here
 
 This repository contains both the original Claude integration and the Windows
-Codex bridge. For Codex, use `feat/feishu-ux-20260927`, not the legacy setup on
-`main`. Read [the runtime skill](codex-config/skills/feishu-bot-runtime/SKILL.md)
+Codex bridge. The Windows managed Codex release line is `stable/windows-codex`.
+Read [the Windows release guide](docs/windows-codex-release.md),
+[the runtime skill](codex-config/skills/feishu-bot-runtime/SKILL.md)
 and its [configuration and handoff guide](codex-config/skills/feishu-bot-runtime/references/configuration-and-handoff.md)
 before an authorized connection, configuration or recovery task.
 

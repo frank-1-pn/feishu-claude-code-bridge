@@ -22,8 +22,11 @@ export function streamCard(text, final, options = {}) {
   if(view.publicProgress.length) elements.push(panel('progress','公开进度（北京时间，最近记录）',markdownElements(view.publicProgress.join('\n\n---\n\n'),'progress_text')));
   if(view.report) {
     const name=view.report.fileName.replace(/[<>]/g,'').replace(/([\\`*_{}\[\]()#+.!|~])/g,'\\$1');
-    const label=view.report.delivered?'完整报告已作为附件发送':'完整报告尚未确认送达';
-    elements.push({tag:'markdown',element_id:'report',content:`${label}：${name}${view.report.delivered && view.report.url?`\n\n[打开完整报告](<${view.report.url}>)`:''}`});
+    const label=view.report.delivered?'完整报告已作为附件发送'
+      :view.report.status==='pending'?'完整报告附件等待发送'
+      :view.report.status==='blocked'&&!view.report.uncertain?'完整报告附件未能全部送达'
+      :'完整报告尚未确认送达';
+    elements.push({tag:'markdown',element_id:'report',content:`${label}：${name}${view.report.url?`\n\n[打开已送达的 HTML 报告](<${view.report.url}>)`:''}`});
   }
   // Interactive components are supplied only by the trusted action builder.
   // Forms stay top-level: Feishu does not allow form inside collapsible_panel.

@@ -7,6 +7,10 @@ import { recordFailure } from './codex-bridge-retry.mjs';
 import { bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
 
 const permanent = code => Object.assign(new Error(code), { code, permanent: true });
+const REPORT_NAMES = ['report.html', 'answer.md'];
+const UUID_WINDOW_MS = 55 * 60 * 1000;
+const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const receiptId = value => typeof value === 'string' && /^om_[A-Za-z0-9_-]+$/.test(value) && !value.startsWith('om_cb_');
 export function within(root, file) {
   const rel = path.relative(root, file);
   return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
@@ -58,8 +62,21 @@ export function authorizedFileJob(inboxRoot, binding, jobId, replyKey) {
 
 const originFor = binding => ({ bot: binding.bot, chatId: binding.chat_id, senderId: binding.allowed_sender_id, profile: binding.profile ?? '' });
 const matchesOrigin = (origin, binding) => Object.entries(originFor(binding)).every(([key, value]) => origin?.[key] === value);
+const scopeFor = binding => digest(JSON.stringify(bindingSnapshot(binding)));
+const reportKey = (binding, replyKey, name, contentHash) =>
+  digest(`generated-report\0${binding.bot}\0${replyKey}\0${name}\0${contentHash}`);
+const payloadHashFor = state =>
+  digest(JSON.stringify([state.key,state.mode,state.name,state.hash,state.coverName??null,state.coverHash??null]));
+const validSendRoute = (binding, scope, route) =>
+  route?.version===1 && route.scope===scope && route.chatId===binding.chat_id
+  && ['chat','quote','thread'].includes(route.mode) && (route.mode==='chat'||receiptId(route.messageId));
+const validSendIntent = (state, binding, scope) => {
+  const intent=state.sendIntent;
+  return intent?.schema===1 && intent.scope===scope && intent.uuid===state.key.slice(0,32)
+    && intent.payloadHash===payloadHashFor(state) && validSendRoute(binding,scope,intent.route);
+};
 
-function enqueueSnapshot({ root, binding, jobId, mode, name, bytes, preview, key, reportId }) {
+function enqueueSnapshot({ root, binding, jobId, mode, name, bytes, preview, key, reportId, replyKey }) {
   const botRoot = path.join(root, binding.bot), dir = path.join(botRoot, key);
   fs.mkdirSync(botRoot, { recursive: true });
   if (!within(fs.realpathSync(root), fs.realpathSync(botRoot))) throw permanent('attachment_outside_allowed_roots');
@@ -86,7 +103,7 @@ function enqueueSnapshot({ root, binding, jobId, mode, name, bytes, preview, key
   atomicWriteJson(manifest, { key, jobId, mode, name, coverName, hash: digest(bytes),
     coverHash: preview ? digest(preview.bytes) : null, bytes: bytes.length, origin: originFor(binding),
     deliveryVersion:2,bindingScope:digest(JSON.stringify(bindingSnapshot(binding))),
-    ...(reportId ? { generatedReport: reportId } : {}), status: 'queued', createdAt: Date.now() });
+    ...(reportId ? { generatedReport: reportId, reportReplyKey: replyKey } : {}), status: 'queued', createdAt: Date.now() });
   return { key, status: 'queued' };
 }
 
@@ -116,7 +133,7 @@ export function enqueueFile({ root, inboxRoot, binding, jobId, file, mode = 'fil
 // binds their exact bytes to the same originating message and final reply.
 export function enqueueGeneratedReport({ root, inboxRoot, reportRoot, binding, jobId, replyKey, name }) {
   const job = authorizedFileJob(inboxRoot, binding, jobId, replyKey);
-  if (!['report.html', 'answer.md'].includes(name)) throw permanent('invalid_report_artifact');
+  if (!REPORT_NAMES.includes(name)) throw permanent('invalid_report_artifact');
   const reportId = digest(replyKey), botRoot = fs.realpathSync(path.join(reportRoot, binding.bot));
   if (!within(fs.realpathSync(reportRoot), botRoot)) throw permanent('report_outside_allowed_root');
   const dir = fs.realpathSync(path.join(botRoot, reportId));
@@ -136,27 +153,51 @@ export function enqueueGeneratedReport({ root, inboxRoot, reportRoot, binding, j
   const bytes = fs.readFileSync(file);
   if (bytes.length !== artifact.bytes || bytes.length > limit || digest(bytes) !== artifact.hash) throw permanent('report_snapshot_changed');
   if (name === 'answer.md' && artifact.hash !== manifest.answerHash) throw permanent('report_snapshot_changed');
-  const key = digest(`generated-report\0${binding.bot}\0${replyKey}\0${name}\0${artifact.hash}`);
-  return { name, ...enqueueSnapshot({ root, binding, jobId, mode: 'file', name, bytes, key, reportId }) };
+  const key = reportKey(binding, replyKey, name, artifact.hash);
+  return { name, ...enqueueSnapshot({ root, binding, jobId, mode: 'file', name, bytes, key, reportId, replyKey }) };
 }
 
-export function getReportDelivery({ root, binding, artifacts }) {
+function reportBelongsTo(state, binding, scope, replyKey) {
+  return state.generatedReport===digest(replyKey) && (!state.reportReplyKey||state.reportReplyKey===replyKey)
+    && matchesOrigin(state.origin,binding) && state.deliveryVersion===2 && state.bindingScope===scope
+    && state.mode==='file' && REPORT_NAMES.includes(state.name) && hash(state.hash)
+    && state.key===reportKey(binding,replyKey,state.name,state.hash);
+}
+
+function verifiedReceipt(state, binding, scope) {
+  return hash(state.key) && validSendIntent(state,binding,scope) && state.sendIntent.sent===true
+    && state.sendIntent.uncertain===false && receiptId(state.sendIntent.messageId);
+}
+
+function deliveryState(states) {
+  return {status:states.length && states.every(s=>s==='done')?'done':states.includes('blocked')?'blocked':'pending',
+    total:states.length,done:states.filter(s=>s==='done').length};
+}
+
+function reportAttachmentState(state,binding,scope) {
+  if(state.status==='done' && !verifiedReceipt(state,binding,scope))return 'blocked';
+  return state.status;
+}
+
+export function getReportDelivery({ root, binding, artifacts, replyKey }) {
+  const scope=scopeFor(binding);
+  if(replyKey!==undefined && !hash(replyKey))throw permanent('invalid_report_artifact');
   const states = artifacts.map(({ key }) => {
     if (!/^[a-f0-9]{64}$/.test(key ?? '')) throw permanent('invalid_report_artifact');
     const file = path.join(root, binding.bot, key, 'request.json');
     if (!fs.existsSync(file)) return 'missing';
     const s = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!s.generatedReport || !matchesOrigin(s.origin, binding)) throw permanent('report_binding_mismatch');
-    return s.status;
+    if (!s.generatedReport || !matchesOrigin(s.origin, binding) || s.key!==key
+        || (replyKey && !reportBelongsTo(s,binding,scope,replyKey)))throw permanent('report_binding_mismatch');
+    return replyKey?reportAttachmentState(s,binding,scope):s.status;
   });
-  return { status: states.length && states.every(s => s === 'done') ? 'done' : states.includes('blocked') ? 'blocked' : 'pending',
-    total: states.length, done: states.filter(s => s === 'done').length };
+  return deliveryState(states);
 }
 
 export class FileOutbox {
-  constructor(root, binding, request, { now = Date.now, notify, getRoute } = {}) {
+  constructor(root, binding, request, { now = Date.now, notify, getRoute, reportUpdate, inboxRoot } = {}) {
     this.root = path.join(root, binding.bot); this.binding = binding; this.request = request; this.now = now;
-    this.notify = notify;this.getRoute=getRoute;
+    this.notify = notify;this.getRoute=getRoute;this.reportUpdate=reportUpdate;this.inboxRoot=inboxRoot;
     fs.mkdirSync(this.root, { recursive: true });
   }
   records() {
@@ -166,8 +207,19 @@ export class FileOutbox {
   }
   stats() {
     const states = this.records().map(x => x.s);
+    const failed=states.filter(s=>s.status==='blocked');
+    const scope=scopeFor(this.binding),now=this.now();
+    const historical=failed.filter(s=>hash(s.key) && matchesOrigin(s.origin,this.binding)
+      && s.deliveryVersion===2 && s.bindingScope===scope && s.error==='attachment_delivery_uncertain_expired'
+      && validSendIntent(s,this.binding,scope) && s.sendIntent.uncertain===true
+      && !s.sendIntent.sent && !s.sendIntent.messageId && Number.isFinite(s.sendIntent.uncertainSince)
+      && s.sendIntent.uncertainSince>=0 && now-s.sendIntent.uncertainSince>=UUID_WINDOW_MS);
+    const updates=this.reportUpdate?this.reportUpdates(states):[];
     return { file_pending_count: states.filter(s => s.status === 'queued').length,
-      file_failed_count: states.filter(s => s.status === 'blocked').length };
+      file_failed_count: failed.length, file_active_failed_count:failed.length-historical.length,
+      file_historical_unresolved_count:historical.length,
+      file_report_update_pending_count:updates.filter(({ journal })=>!journal.acknowledged && !journal.blocked).length,
+      file_report_update_blocked_count:updates.filter(({ journal })=>!journal.acknowledged && journal.blocked).length };
   }
   flush() {
     // Final reply delivery and the periodic worker can request a flush together.
@@ -177,8 +229,11 @@ export class FileOutbox {
     return this.flushing;
   }
   async flushOnce() {
-    for (const { file, s } of this.records()) {
-      if(s.status==='blocked' && !s.noticeSent && this.notify) {
+    const records=this.records();
+    const groups=this.reportUpdate?this.reportGroups(records.map(({ s })=>s)):new Map();
+    const statusUpdates=new Set([...groups.values()].flat());
+    for (const { file, s } of records) {
+      if(s.status==='blocked' && !s.noticeSent && this.notify && !statusUpdates.has(s)) {
         const noticeFile = s.generatedReport ? path.join(this.root, `report-notice-${s.generatedReport}.json`) : null;
         if (noticeFile && fs.existsSync(noticeFile)) { s.noticeSent = true; atomicWriteJson(file,s); continue; }
         s.noticeRetry ??= {};
@@ -196,8 +251,23 @@ export class FileOutbox {
       if (s.status !== 'queued' || (s.retryAt ?? 0) > this.now()) continue;
       try {
         if ((s.origin && !matchesOrigin(s.origin, this.binding)) || (s.generatedReport && !s.origin)) throw permanent('attachment_binding_mismatch');
-        const scope=digest(JSON.stringify(bindingSnapshot(this.binding)));
+        const scope=scopeFor(this.binding);
         if(s.deliveryVersion===2&&s.bindingScope!==scope)throw permanent('attachment_binding_mismatch');
+        if(s.reportReplyKey!==undefined){
+          if(!hash(s.reportReplyKey)||!reportBelongsTo(s,this.binding,scope,s.reportReplyKey))
+            throw permanent('report_binding_mismatch');
+          if(this.inboxRoot){
+            const origin=authorizedFileJob(this.inboxRoot,this.binding,s.jobId,s.reportReplyKey);
+            const receipt=path.join(this.inboxRoot,this.binding.bot,`sent-${s.reportReplyKey}.json`);
+            if(!fs.existsSync(receipt)){
+              if(origin.status==='failed'||(origin.status==='reply_pending'&&origin.replyRetry?.blocked===true))
+                throw permanent('report_final_delivery_blocked');
+              continue;
+            }
+            const {sentAt,local}=JSON.parse(fs.readFileSync(receipt,'utf8'));
+            if(!Number.isFinite(sentAt)||sentAt<0||local)throw permanent('report_final_receipt_invalid');
+          }
+        }
         const dir = path.join(path.dirname(file),'payload');
         if(fs.realpathSync(dir)!==path.join(fs.realpathSync(path.dirname(file)),'payload'))
           throw permanent('attachment_snapshot_changed');
@@ -221,27 +291,81 @@ export class FileOutbox {
       atomicWriteJson(file, s);
     }
   }
+  reportGroups(states) {
+    const scope=scopeFor(this.binding);
+    const groups=new Map();
+    const replyKeys=new Set(states.map(state=>state.reportReplyKey).filter(hash));
+    const byReport=new Map([...replyKeys].map(replyKey=>[digest(replyKey),replyKey]));
+    for(const state of states){
+      const replyKey=byReport.get(state.generatedReport);
+      if(!replyKey||!reportBelongsTo(state,this.binding,scope,replyKey))continue;
+      if(!groups.has(replyKey))groups.set(replyKey,[]);
+      groups.get(replyKey).push(state);
+    }
+    for(const [replyKey,group] of groups){
+      if(group.length!==REPORT_NAMES.length || !REPORT_NAMES.every(name=>group.some(state=>state.name===name))
+          || !group.every(state=>state.jobId===group[0].jobId))groups.delete(replyKey);
+    }
+    return groups;
+  }
+  reportUpdates(states) {
+    const scope=scopeFor(this.binding);
+    const updates=[];
+    for(const [replyKey,group] of this.reportGroups(states)){
+      if(!group.every(state=>['done','blocked'].includes(state.status)))continue;
+      const html=group.find(state=>state.name==='report.html');
+      const delivery=deliveryState(group.map(state=>reportAttachmentState(state,this.binding,scope)));
+      const update={replyKey,jobId:html.jobId,fileName:html.name,...delivery,delivered:delivery.status==='done',
+        ...(verifiedReceipt(html,this.binding,scope)?{messageId:html.sendIntent.messageId}:{}),
+        uncertain:group.some(state=>state.sendIntent?.uncertain===true)};
+      const file=path.join(this.root,`report-update-${digest(replyKey)}.json`);
+      const fingerprint=digest(JSON.stringify([scope,update]));
+      const stored=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):null;
+      const journal=stored?.fingerprint===fingerprint?stored:{fingerprint};
+      updates.push({file,journal,update});
+    }
+    return updates;
+  }
+  flushReportUpdates() {
+    if(!this.reportUpdate)return Promise.resolve();
+    if(!this.flushingReports)this.flushingReports=this.flushReportUpdatesOnce().finally(()=>{this.flushingReports=null;});
+    return this.flushingReports;
+  }
+  async flushReportUpdatesOnce() {
+    for(const {file,journal,update} of this.reportUpdates(this.records().map(({ s })=>s))){
+      if(journal.acknowledged || journal.blocked || (journal.retryAt??0)>this.now())continue;
+      try {
+        // The card may still be in flight, or the final may have fallen back
+        // to text. The worker decides when an update was actually delivered.
+        if(await this.reportUpdate(update)!==true)throw Object.assign(Error('report_update_deferred'),{code:'report_update_deferred'});
+        journal.acknowledged=true;
+        journal.acknowledgedAt=this.now();
+        delete journal.error;delete journal.retryAt;
+      } catch(error) {
+        recordFailure(journal,error,this.now());
+      }
+      atomicWriteJson(file,journal);
+    }
+  }
   async sendRouted(file,s,legacyArgs,dir,scope){
-    const validRoute=route=>route?.version===1&&route.scope===scope&&route.chatId===this.binding.chat_id
-      &&['chat','quote','thread'].includes(route.mode)&&(route.mode==='chat'||(/^om_[A-Za-z0-9_-]+$/.test(route.messageId??'')&&!route.messageId.startsWith('om_cb_')));
-    const payloadHash=digest(JSON.stringify([s.key,s.mode,s.name,s.hash,s.coverName??null,s.coverHash??null]));
+    const payloadHash=payloadHashFor(s);
     if(!s.sendIntent){
       // Every pre-upgrade request keeps its original chat endpoint and UUID.
       // Its old format did not checkpoint first IO; creation time is the only
       // conservative bound for an unknown request that may already have sent.
       const legacy=s.deliveryVersion!==2||s.legacySendStartedAt!==undefined;
       const route=legacy?{version:1,scope,chatId:this.binding.chat_id,mode:'chat'}:await this.getRoute(s.jobId);
-      if(!validRoute(route))throw permanent('attachment_reply_route_invalid');
+      if(!validSendRoute(this.binding,scope,route))throw permanent('attachment_reply_route_invalid');
       s.sendIntent={schema:1,scope,payloadHash,route,uuid:s.key.slice(0,32),legacy,
         uncertain:legacy,uncertainSince:legacy?(s.legacySendStartedAt??s.createdAt):undefined};
       atomicWriteJson(file,s);
     }
     const intent=s.sendIntent;
-    if(intent.schema!==1||intent.scope!==scope||intent.payloadHash!==payloadHash||intent.uuid!==s.key.slice(0,32)||!validRoute(intent.route)
+    if(!validSendIntent(s,this.binding,scope)
       ||(intent.uncertain&&(!Number.isFinite(intent.uncertainSince)||intent.uncertainSince>this.now())))throw permanent('attachment_send_intent_invalid');
-    if(intent.sent){if(!/^om_[A-Za-z0-9_-]+$/.test(intent.messageId??''))throw permanent('attachment_send_intent_invalid');return;}
+    if(intent.sent){if(!receiptId(intent.messageId))throw permanent('attachment_send_intent_invalid');return;}
     for(let step=0;step<3;step++){
-      if(intent.uncertain&&this.now()-intent.uncertainSince>=55*60*1000){
+      if(intent.uncertain&&this.now()-intent.uncertainSince>=UUID_WINDOW_MS){
         throw Object.assign(permanent('attachment_delivery_uncertain_expired'),{deliveryUncertain:true});
       }
       const route=intent.route;
@@ -251,7 +375,7 @@ export class FileOutbox {
       intent.uncertain=true;intent.uncertainSince??=this.now();intent.lastAttemptAt=this.now();atomicWriteJson(file,s);
       try{
         const result=await this.request(this.binding,args,dir);
-        if(!/^om_[A-Za-z0-9_-]+$/.test(result?.message_id??'')||(result.chat_id&&result.chat_id!==this.binding.chat_id))
+        if(!receiptId(result?.message_id)||(result.chat_id&&result.chat_id!==this.binding.chat_id))
           throw Object.assign(Error('attachment_ack_invalid'),{code:'attachment_ack_invalid'});
         intent.sent=true;intent.messageId=result.message_id;intent.uncertain=false;atomicWriteJson(file,s);return;
       }catch(error){

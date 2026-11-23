@@ -26,10 +26,10 @@ function fixture(t,{cardkit=true,presentation=true}={}){
     else if(call.method==='PATCH'){server.displayedCards.push(JSON.parse(call.data.content));server.events.push({type:'patch',call});}
     await server.after?.(call,result);return result;
   };
-  const reload=({onCardMessage}={})=>{
+  const reload=({onCardMessage,resolveMessageLink}={})=>{
     const router=new DurableReplyRouter({root:path.join(root,'routes'),binding,request,now:()=>clock.now});
     const outbound=new DurableOutbound(path.join(root,'outbound'),binding,request,{now:()=>clock.now,minIntervalMs:1000,
-      presentationEnabled:presentation,sendMessage:args=>router.send(args),
+      presentationEnabled:presentation,sendMessage:args=>router.send(args),resolveMessageLink,
       onCardMessage:async(id,p)=>{server.events.push({type:'bind',id,p});await onCardMessage?.(id,p);}});
     return {router,outbound};
   };
@@ -166,6 +166,80 @@ test('merged progress retires the older visible card across restart before posti
   assert.equal(finalState(f,'latest').messageId,latest);
   assert.equal(finalState(f,'latest').finalDelivered,true);
   assert.equal(finalState(f,'old').lastAppliedCard.header.title.content,'已转到最新卡片');
+});
+
+test('older card gets an exact successor link after the latest card is sent and retries the same patch across restart', async t=>{
+  const f=fixture(t), lookups=[];
+  const resolveMessageLink=async id=>{
+    lookups.push(id);
+    return 'https://applink.feishu.cn/client/chat/open?openChatId=oc_fixture&position=207';
+  };
+  ({outbound:f.outbound}=f.reload({resolveMessageLink}));
+  f.outbound.progress('旧进度','old',f.route);await f.outbound.flushCards();
+  const original=finalState(f,'old');
+  await f.outbound.handoffProgress('新的进度','latest',f.route,{position:10,supersededKeys:['old']});
+  await f.outbound.flushSuccessorLinks();
+  assert.deepEqual(lookups,[]);
+  await f.outbound.flushCards();
+  assert.equal(finalState(f,'old').cardClosed,true);
+  assert.equal(sentCalls(f).length,2);
+  let lost=true;
+  f.server.after=async call=>{
+    if(lost && call.method==='PUT' && JSON.stringify(call.data).includes('打开最新卡片')){
+      lost=false;throw Object.assign(Error('ack lost'),{code:'ETIMEDOUT'});
+    }
+  };
+  await f.outbound.flushSuccessorLinks();
+  const next=finalState(f,'latest');
+  assert.deepEqual(lookups,[next.messageId]);
+  ({outbound:f.outbound}=f.reload({resolveMessageLink}));f.clock.now+=10000;
+  await f.outbound.final('最终答复','result',['latest','old'],{replyRoute:f.route});
+  assert.equal(finalState(f,'latest').finalDelivered,true);
+  await f.outbound.flushSuccessorLinks();
+  const old=finalState(f,'old');
+  assert.equal(old.successorLink.done,true);
+  assert.equal(old.messageId,original.messageId);
+  const button=f.server.displayedCards.at(-1).body.elements.find(el=>el.element_id==='latest_task_card');
+  assert.equal(button.behaviors[0].type,'open_url');
+  assert.match(button.behaviors[0].default_url,/position=207$/);
+  const patches=f.server.calls.filter(call=>call.method==='PUT' && JSON.stringify(call.data).includes('打开最新卡片'));
+  assert.equal(patches.length,2);assert.deepEqual(patches[0].data,patches[1].data);
+  const writes=f.server.calls.length;await f.outbound.flushSuccessorLinks();await f.outbound.flushCards();
+  assert.equal(f.server.calls.length,writes);assert.equal(sentCalls(f).length,2);assert.deepEqual(lookups,[next.messageId]);
+});
+
+test('an unavailable successor link leaves an explanatory closed card and stops time-consuming lookups', async t=>{
+  const f=fixture(t);
+  let lookups=0;
+  ({outbound:f.outbound}=f.reload({resolveMessageLink:async()=>{lookups++;return 'https://wrong.example.test/';}}));
+  f.outbound.progress('旧进度','old',f.route);await f.outbound.flushCards();
+  await f.outbound.handoffProgress('新的进度','latest',f.route,{position:10,supersededKeys:['old']});
+  await f.outbound.flushCards();
+  const writes=f.server.calls.length;
+  await f.outbound.flushSuccessorLinks();await f.outbound.flushSuccessorLinks();
+  assert.equal(lookups,1);assert.equal(f.server.calls.length,writes);assert.equal(finalState(f,'old').cardClosed,true);
+  assert.deepEqual(finalState(f,'old').presentation.interactions,[]);
+});
+
+test('deferred file delivery updates only the same final card and never reverts a receipt', async t=>{
+  const f=fixture(t);
+  const title='结论先到，报告随后交付。';
+  await f.outbound.final(title,'reply_key',[],{replyRoute:f.route,report:{fileName:'report.html',status:'pending',delivered:false}});
+  const key='reply:reply_key', original=finalState(f,key);
+  const url='https://applink.feishu.cn/client/chat/open?openChatId=oc_fixture&position=17';
+  const delivered={status:'done',fileName:'report.html',delivered:true,done:2,total:2,url};
+  assert.equal(await f.outbound.attachReport('wrong-key',delivered),false);
+  assert.equal(await f.outbound.attachReport('reply_key',delivered),true);
+  const final=finalState(f,key);
+  assert.equal(final.messageId,original.messageId);
+  assert.equal(final.text,title);
+  assert.equal(final.presentation.report.url,url);
+  assert.match(JSON.stringify(f.server.displayedCards.at(-1)),/完整报告已作为附件发送/);
+  const writes=f.server.calls.length;
+  await f.outbound.attachReport('reply_key',delivered);
+  await f.outbound.attachReport('reply_key',{...delivered,status:'blocked',delivered:false});
+  assert.equal(f.server.calls.length,writes);
+  assert.equal(sentCalls(f).length,1);
 });
 
 test('native controls bind only to the latest final card in a merged turn',async t=>{

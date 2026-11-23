@@ -2,8 +2,10 @@
 
 ## Current Codex runtime instructions
 
-**Windows Codex users:** the maintained runtime is on
-[`feat/feishu-ux-20260927`](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/feat/feishu-ux-20260927).
+**Windows Codex users:** use the
+[`stable/windows-codex`](https://github.com/frank-1-pn/feishu-claude-code-bridge/tree/stable/windows-codex)
+release line for the managed Windows runtime. Verify the fixed commit and
+installation with the [Windows release guide](docs/windows-codex-release.md).
 The default `main` branch retains the original Claude implementation.
 Start with the Chinese [configuration and session handoff guide](codex-config/skills/feishu-bot-runtime/references/configuration-and-handoff.md)
 and the [2026-09-30 runtime/GitHub comparison](docs/feishu-runtime-sync-20260930.md).

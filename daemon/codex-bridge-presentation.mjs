@@ -152,6 +152,8 @@ export function buildPresentation(value, options = {}) {
   const report = options.report && typeof options.report.fileName === 'string' ? {
     fileName: options.report.fileName.replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 160),
     delivered: options.report.delivered === true,
+    status: options.report.status,
+    uncertain: options.report.uncertain === true,
     url: safeHttpUrl(options.report.url),
   } : null;
   if(report?.delivered && answer==='正文包含较长内容，请展开查看完整答复。') answer='完整内容见随附报告。';

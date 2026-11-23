@@ -46,6 +46,9 @@ import { CloudDocOutbox } from './codex-bridge-cloud-docs.mjs';
 import { hydrateNativeContext } from './codex-bridge-native-context.mjs';
 import { preflightManaged, submitManagedPrompt } from './codex-bridge-app-server.mjs';
 import { UX_PROMPT, bindingSnapshot, isBoundJob } from './codex-bridge-ux.mjs';
+import { buildStatusReply, lookupMessageAppLink, parseStatusQuery } from './codex-bridge-status-query.mjs';
+import { HistoryRecovery, hasNewerLiveInput, historyRequestArgs, verifiedRecoveryHeartbeat } from './codex-bridge-history-recovery.mjs';
+import { syncReceiptDiagnostic } from './codex-bridge-idle.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DAEMON_DIR = path.dirname(SCRIPT_PATH);
@@ -142,6 +145,8 @@ function loadAndValidateConfig(bindingsPath) {
       throw new Error(`${bot}: invalid allowed_sender_id`);
     }
     if (typeof binding.profile !== 'string') throw new Error(`${bot}: profile must be a string`);
+    if(!['off','audit','replay'].includes(binding.history_recovery_mode??'audit'))
+      throw new Error(`${bot}: invalid history recovery mode`);
     if (profiles.has(binding.profile)) throw new Error(`${bot}: one runtime binding per Lark profile is required`);
     profiles.add(binding.profile);
     binding.bot = bot;
@@ -1130,6 +1135,20 @@ async function mainLoop() {
 const LARK_ENTRY = path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@larksuite', 'cli', 'bin', process.platform === 'win32' ? 'lark-cli.exe' : 'lark-cli');
 const INBOX_ROOT = path.join(DAEMON_DIR, 'state', 'codex-inbox-v2');
 
+function readRecoveryHeartbeat(binding) {
+  try {
+    const supervisor=readJson(path.join(DAEMON_DIR,'state','watchdog.json'));
+    const age=Date.now()-Date.parse(supervisor.checked_at);
+    const identity=supervisor.socket_identities?.[binding.bot];
+    if(!identity || !Number.isFinite(age) || age<0 || age>125000)return null;
+    const pid=Number(fs.readFileSync(path.join(TEMP_DIR,`lark-${binding.bot}.pid`),'ascii').trim());
+    if(!Number.isInteger(pid) || identity.pid!==pid)return null;
+    const snapshot=readJson(path.join(TEMP_DIR,`lark-${binding.bot}-ws-health.json`));
+    if(snapshot.generation!==identity.generation)return null;
+    return verifiedRecoveryHeartbeat(snapshot,{pid,startedAtMs:identity.started_at_ms,profile:binding.profile});
+  } catch { return null; }
+}
+
 async function lark(binding, args, cwd = DAEMON_DIR) {
   const result=await createLarkTransport(LARK_ENTRY, { children: activeChildren, cwd: DAEMON_DIR })(binding, args, cwd);
   lastSuccessAt=new Date().toISOString();return result;
@@ -1155,6 +1174,7 @@ async function durableBotLoops(binding) {
   } catch {log('reaction_state_unavailable',{bot:binding.bot});}
   const actions=new ActionStore({root:path.join(DAEMON_DIR,'state','actions-v1'),bot:binding.bot});
   const contextRequest=createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:15000});
+  const quickLinkRequest=createLarkTransport(LARK_ENTRY,{children:activeChildren,cwd:DAEMON_DIR,timeoutMs:2500});
   let inbox,nativeInteractions;
   const getRoute=(context={})=>{
     const allJobs=[...(inbox?.jobs.values()??[])];
@@ -1163,8 +1183,13 @@ async function durableBotLoops(binding) {
     return selectReplyRoute(binding,jobs,{allJobs});
   };
   const router=new DurableReplyRouter({root:path.join(DAEMON_DIR,'state','native-replies-v1'),binding,request:lark});
+  const statusRouter=new DurableReplyRouter({root:path.join(DAEMON_DIR,'state','native-status-replies-v1'),binding,request:contextRequest});
+  const statusOutbound=new DurableOutbound(path.join(DAEMON_DIR,'state','outbound-status-v1'),binding,contextRequest,
+    {sendMessage:args=>statusRouter.send(args)});
+  const resolveMessageLink=id=>lookupMessageAppLink(binding,id,contextRequest);
   const outbound = new DurableOutbound(path.join(DAEMON_DIR, 'state', 'outbound-v3'), binding, lark, {
     presentationEnabled:true,minIntervalMs:2000,sendMessage:args=>router.send(args),
+    resolveMessageLink,
     onCardMessage:(messageId,presentation)=>{
       if(presentation?.actionContext)actions.bindMessage(presentation.actionContext,messageId);
       if(presentation?.nativeContext)nativeInteractions.bindMessage(presentation.nativeContext,messageId);
@@ -1181,12 +1206,49 @@ async function durableBotLoops(binding) {
     notify:async(text,key,record)=>{
       if(!await outbound.attachCloudDoc(record.replyKey,record))await outbound.text(text,key,getRoute(record.jobId));
     }});
-  const files = new FileOutbox(path.join(DAEMON_DIR, 'state', 'file-outbox'), binding,
-    (...args) => outbound.serial(() => lark(...args)), {getRoute,notify:(text,key,jobId)=>outbound.text(text,key,getRoute(jobId))});
+  const files = new FileOutbox(path.join(DAEMON_DIR, 'state', 'file-outbox'), binding,lark,{
+    inboxRoot:INBOX_ROOT,getRoute,notify:(text,key,jobId)=>outbound.text(text,key,getRoute(jobId)),
+    reportUpdate:async update=>{
+      const source=inbox.jobs.get(update.jobId);
+      if(!source || source.replyKey!==update.replyKey || !isBoundJob(binding,source))
+        throw Object.assign(Error('report_update_source_changed'),{permanent:true});
+      let url;
+      if(update.messageId)try { url=await resolveMessageLink(update.messageId); } catch { /* Receipt is authoritative. */ }
+      if(await outbound.attachReport(update.replyKey,{...update,url}))return true;
+      if(source.status==='failed'||(source.status==='reply_pending'&&source.replyRetry?.blocked===true))
+        throw Object.assign(Error('report_final_delivery_blocked'),{permanent:true});
+      if(source.status!=='done')return false;
+      const summary=update.delivered?'完整报告附件已送达。'
+        :update.uncertain?'完整报告附件的送达状态待核对，正文已保留。':'完整报告附件未能全部送达，正文已保留。';
+      await outbound.text(url?`${summary}\n[打开附件](${url})`:summary,`report-update:${update.replyKey}`,getRoute(source.id));
+      return true;
+    }
+  });
   const final=createReplyDelivery({binding,actions,outbound,files,cloudDocs,nativeInteractions,getRoute,log,reportOptions:{
     reportRoot:path.join(DAEMON_DIR,'state','reports-v1'),fileOutboxRoot:path.join(DAEMON_DIR,'state','file-outbox'),inboxRoot:INBOX_ROOT,
   }});
   inbox = new DurableInbox(INBOX_ROOT, binding.bot, {
+    isLocalQuery:job=>isBoundJob(binding,job) && Boolean(parseStatusQuery(job.event)),
+    localQuery:async job=>{
+      const event=await hydrateNativeContext(binding,job.event,(b,args)=>
+        quickLinkRequest(b,args[1]==='+messages-mget'?[...args,'--no-reactions']:args));
+      if(!event.native_context_verified) {
+        if(job.event.parent_id || job.event.root_id || job.event.thread_id)
+          return {text:'暂时无法核实所引用的任务。请稍后重试。'};
+        // A compact event can also omit the reference entirely.
+        return {text:'暂时无法核实这条查询的会话位置。请稍后重试。'};
+      }
+      const candidate={...job,event};inbox.save(candidate);Object.assign(job,candidate);
+      const reply=buildStatusReply({binding,queryJob:job,jobs:inbox.jobs.values(),cards:outbound.cardRecords(),
+        files:files.records().map(({s})=>s),
+        hasReplyReceipt:key=>/^[a-f0-9]{64}$/.test(key??'') && fs.existsSync(path.join(inbox.dir,`sent-${key}.json`))});
+      if(reply?.messageId && reply.kind!=='status')try {
+        const url=await lookupMessageAppLink(binding,reply.messageId,quickLinkRequest);
+        if(url)reply.text+=`\n[打开任务卡片](${url})`;
+      } catch { /* The local result remains usable without a jump link. */ }
+      return reply;
+    },
+    sendLocalQuery:(text,key,context)=>statusOutbound.text(text,key,getRoute(context)),
     prepare: async event => {
       const hydrated=await hydrateNativeContext(binding,event,contextRequest);
       const job=inbox.jobs.get(event.message_id??event.id);
@@ -1236,6 +1298,34 @@ async function durableBotLoops(binding) {
     }
   };
   let actionDrain={blocked:0,pending:0};
+  const acceptMessage=event=>{
+    if(!isAuthorizedEvent(binding,event) || !isFreshEvent(event))return false;
+    const id=event.message_id??event.id;
+    if(seenIds.includes(id) || inbox.jobs.has(id))return false;
+    inbox.enqueue({...event,bridge_binding:bindingSnapshot(binding)});
+    return true;
+  };
+  const recovery=new HistoryRecovery({
+    stateFile:path.join(DAEMON_DIR,'state','history-recovery-v1',`${binding.bot}.json`),binding,
+    mode:binding.history_recovery_mode??'audit',
+    maxEventAgeMs:config.runtime.max_event_age_ms,maxInboundBytes:config.runtime.max_inbound_bytes,
+    readHeartbeat:()=>readRecoveryHeartbeat(binding),
+    readHistory:window=>contextRequest(binding,historyRequestArgs(window,binding)),
+    drainIntake:()=>{
+      try {
+        const before=fs.lstatSync(binding.logPath);
+        const raw=fs.readFileSync(binding.offsetPath,'ascii').trim();
+        const after=fs.lstatSync(binding.logPath);
+        const offset=Number(raw);
+        return before.isFile() && after.isFile() && before.dev===after.dev && before.ino===after.ino &&
+          before.size===after.size && before.mtimeMs===after.mtimeMs && /^\d+$/.test(raw) &&
+          Number.isSafeInteger(offset) && offset===after.size;
+      } catch { return false; }
+    },
+    hasSeen:id=>inbox.jobs.has(id) || seenIds.includes(id),
+    enqueue:event=>!hasNewerLiveInput(binding,event,inbox.jobs.values()) &&
+      acceptMessage({...event,history_recovered:true}),
+  });
   const intake = async () => {
     for(let i=0;i<100;i++) {
       const record=readNextLine(binding); if(!record) break;
@@ -1258,10 +1348,7 @@ async function durableBotLoops(binding) {
           }
         }
       }
-      if (event && record.lineBytes.length<=config.runtime.max_inbound_bytes && isAuthorizedEvent(binding,event) && isFreshEvent(event)) {
-        const id=event.message_id??event.id;
-        if(!seenIds.includes(id)) inbox.enqueue({...event,bridge_binding:bindingSnapshot(binding)});
-      }
+      if(event && record.lineBytes.length<=config.runtime.max_inbound_bytes)acceptMessage(event);
       if(!writeOffset(binding,record.offset,record.nextOffset,record.originalBytes)) break;
     }
   };
@@ -1277,7 +1364,7 @@ async function durableBotLoops(binding) {
       inbox.save(j);
     }
     // This is an intake/receipt diagnostic cursor, not proof of model delivery.
-    atomicWriteText(binding.receiptOffsetPath,String(readOffset(binding)??0));
+    syncReceiptDiagnostic(binding,{readOffset});
   };
   const watch = async () => {
     await inbox.watch();
@@ -1288,17 +1375,23 @@ async function durableBotLoops(binding) {
     const nativeStats=nativeInteractions.actions.stats();
     const reactionStats=reactions?.stats()??{reaction_blocked_count:1,reaction_last_error:'state_unavailable'};
     updateBotStatus(binding.bot,{...stats,...fileStats,...reactionStats,...router.stats(),...cloudDocs.stats(),...nativeStats,
+      history_recovery:recovery.stats(),
       voice_enabled:binding.voice_enabled===true,action_accepted_count:actionStats.accepted_count,
       action_pending_count:actionStats.pending_count,action_blocked_count:actionDrain.blocked,
-      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_failed_count||actionDrain.blocked?'degraded':busy?'processing':'idle',
+      state:stats.failed_count||stats.watch_error_count||stats.outbound_blocked_count||fileStats.file_active_failed_count||
+        fileStats.file_report_update_blocked_count||actionDrain.blocked?'degraded':busy?'processing':'idle',
       current_message_id:[...inbox.jobs.values()].find(j=>!['done','failed'].includes(j.status))?.id??null,
       delivery_stalled:(stats.awaiting_delivery_count>0 && stats.oldest_undelivered_seconds>120) || stats.oldest_queued_seconds>120});
   };
   await Promise.all([loop('intake',intake),loop('dispatch',()=>inbox.dispatchOne()),
+    loop('local-status',()=>inbox.dispatchLocalQuery(),250),
+    loop('history-recovery',()=>recovery.tick(),5000),
     loop('actions',()=>{actionDrain=actions.drain({binding,inbox});}),
     loop('native-actions',()=>nativeInteractions.drain(),1000),loop('cloud-docs',()=>cloudDocs.flush(),1000),
     loop('watch',watch),loop('replies',()=>inbox.deliverReplies()),loop('receipts',receipts,1000),
     loop('cards',()=>outbound.flushCards(),1000),loop('files',()=>files.flush(),1000),
+    loop('report-updates',()=>files.flushReportUpdates(),1000),
+    loop('successor-links',()=>outbound.flushSuccessorLinks(),2000),
     loop('reaction-observe',()=>reactions?.observe(inbox.jobs.values()),500),
     loop('reactions',()=>reactions?.flush(),1000)]);
 }

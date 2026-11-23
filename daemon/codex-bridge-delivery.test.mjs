@@ -11,6 +11,7 @@ import { createReplyDelivery } from './codex-bridge-delivery.mjs';
 import { streamCard } from './codex-bridge-cardkit.mjs';
 import { subscriberArgs } from './start-lark-append.mjs';
 import { bindingSnapshot } from './codex-bridge-ux.mjs';
+import { selectReplyRoute } from './codex-bridge-reply-routing.mjs';
 
 function fixture(t,{cardFail=false,fileFail=false,interactions=true}={}){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'feishu-ux-integration-'));
@@ -31,9 +32,11 @@ function fixture(t,{cardFail=false,fileFail=false,interactions=true}={}){
   };
   const outbound=new DurableOutbound(path.join(root,'outbound'),binding,request,{presentationEnabled:true,
     onCardMessage:(id,p)=>{if(p?.actionContext)actions.bindMessage(p.actionContext,id);}});
-  const files=new FileOutbox(reportOptions.fileOutboxRoot,binding,(...args)=>outbound.serial(()=>request(...args)));
-  const deliver=createReplyDelivery({binding,actions,outbound,files,reportOptions});
   const inbox=new DurableInbox(reportOptions.inboxRoot,binding.bot,{});
+  const files=new FileOutbox(reportOptions.fileOutboxRoot,binding,request,{
+    getRoute:id=>selectReplyRoute(binding,[inbox.jobs.get(id)]),
+  });
+  const deliver=createReplyDelivery({binding,actions,outbound,reportOptions});
   const source=(text,id='om_source')=>{
     const job=inbox.enqueue({type:'im.message.receive_v1',message_id:id,message_type:'text',content:'request',chat_id:binding.chat_id,
       sender_id:binding.allowed_sender_id,bridge_binding:bindingSnapshot(binding)});
@@ -75,13 +78,16 @@ test('missing conditions render waiting form and one submit contains all conditi
   assert.equal(f.inbox.jobs.size,2);assert.match([...f.inbox.jobs.values()][1].event.content,/同事/);
 });
 
-test('long reply sends immutable complete files before a compact final and retries no delivery',async t=>{
+test('long reply publishes the final card and retains immutable queued files until separate delivery runs',async t=>{
   const f=fixture(t),answer='结论：完整报告已整理。\n\n- 第一点\n- 第二点\n\n'+('长段落内容😀\n\n'.repeat(400));
   const job=f.source(answer);await f.deliver(answer,job.replyKey,[],{jobId:job.id});
-  assert.equal(f.calls.filter(a=>a.includes('--file')).length,2);
-  const c=f.card();assert.ok(!c.body.elements.some(e=>e.element_id==='details'));assert.match(JSON.stringify(c),/完整报告已作为附件发送/);
+  assert.equal(f.calls.filter(a=>a.includes('--file')).length,0);
+  assert.equal(f.files.stats().file_pending_count,2);
+  const c=f.card();assert.ok(c.body.elements.some(e=>e.element_id==='details'));assert.match(JSON.stringify(c),/完整报告附件等待发送/);
   assert.equal(fs.readFileSync(path.join(f.reportOptions.reportRoot,f.binding.bot,digest(job.replyKey),'answer.md'),'utf8'),answer.trim());
   const count=f.calls.length;await f.deliver(answer,job.replyKey,[],{jobId:job.id});assert.equal(f.calls.length,count);
+  await f.files.flush();
+  assert.equal(f.calls.filter(a=>a.includes('--file')).length,2);
 });
 
 test('report outage retains pending files and full final; never claims report delivered',async t=>{

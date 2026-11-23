@@ -79,6 +79,16 @@ try {
             if ($bot.PSObject.Properties['cwd_exists'] -and -not $bot.cwd_exists) { $reasons += "$($bot.bot):cwd_missing" }
         }
     }
+    $socketIdentities = [ordered]@{}
+    foreach ($bot in $check.Data.bots) {
+        if ($bot.daemon_healthy -and $bot.socket_verified -and $bot.subscriber_started_at_ms -gt 0) {
+            $socketIdentities[[string]$bot.bot] = [ordered]@{
+                pid = [int]$bot.daemon_pid
+                started_at_ms = [long]$bot.subscriber_started_at_ms
+                generation = [long]$bot.socket_generation
+            }
+        }
+    }
     $state = [ordered]@{
         checked_at = [DateTimeOffset]::UtcNow.ToString('o')
         healthy = $healthy
@@ -92,6 +102,7 @@ try {
         last_alert_at = [long]$previous.last_alert_at
         bridge_identity_ok = [bool]$check.Data.bridge.exact_identity
         bridge_heartbeat_fresh = [bool]$check.Data.bridge.heartbeat_fresh
+        socket_identities = $socketIdentities
     }
     if (-not $healthy -and -not $recovering -and -not $cooldown -and $failures -ge 3 -and -not $NoAlert -and $now - $state.last_alert_at -ge 1800) {
         # Use the configured primary binding; never copy chat identifiers here.

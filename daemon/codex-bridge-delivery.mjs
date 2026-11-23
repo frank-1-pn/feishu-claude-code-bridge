@@ -5,9 +5,7 @@ import { getReportDelivery, authorizedFileJob } from './codex-bridge-files.mjs';
 import { buildActionElements } from './codex-bridge-action-ui.mjs';
 import { replyRouteNotice } from './codex-bridge-reply-routing.mjs';
 
-// One integration owner calls this outside the outbound serial lane: file
-// sends use that same lane and must finish before the final-card operation.
-export function createReplyDelivery({ binding, actions, outbound, files, reportOptions, cloudDocs, nativeInteractions, getRoute, log=()=>{} }) {
+export function createReplyDelivery({ binding, actions, outbound, reportOptions, cloudDocs, nativeInteractions, getRoute, log=()=>{} }) {
   const unavailable=(name,jobId)=>{try{log(name,{bot:binding.bot,jobId});}catch{/* Feedback must not block the answer. */}};
   return async (value, replyKey, streamKeys=[], context={}) => {
     if(context.jobId){
@@ -42,8 +40,7 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
             try{cloudDocs.enqueue({jobId:context.jobId,replyKey,text:clean});}
             catch{unavailable('reply_cloud_doc_unavailable',context.jobId);}
           }
-          await files.flush();
-          const delivery=getReportDelivery({root:reportOptions.fileOutboxRoot,binding,artifacts:report.artifacts});
+          const delivery=getReportDelivery({root:reportOptions.fileOutboxRoot,binding,artifacts:report.artifacts,replyKey});
           presentation.report={fileName:report.artifacts.find(a=>a.name.endsWith('.html'))?.name??'report.html',
             delivered:delivery.status==='done',status:delivery.status};
         }

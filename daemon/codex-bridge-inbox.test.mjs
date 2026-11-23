@@ -27,6 +27,36 @@ test('three messages dispatch before first final; one combined response is sent 
   f.append(marker('a'),marker('b'),marker('c'),answer()); await f.q.watch(); await f.q.deliverReplies();
   assert.equal(f.sent.length,1);assert.equal(f.q.stats().completed_count,3);
 });
+test('local status bypasses an in-flight model dispatch and retries a frozen reply after restart',async t=>{
+  let release,entered;
+  const wait=new Promise(resolve=>{release=resolve;});
+  const ready=new Promise(resolve=>{entered=resolve;});
+  const sends=[];let builds=0;
+  const f=fixture(t,{
+    prepare:async e=>{entered();await wait;return e;},
+    isLocalQuery:job=>job.event.content==='/status',
+    localQuery:()=>({text:`snapshot ${++builds}`}),
+    send:async(text,key,scope)=>{sends.push({text,key,id:scope.jobId});if(sends.length===1)throw Error('lost receipt');},
+  });
+  f.q.enqueue(event('task'));
+  f.q.enqueue(event('query','text','/status'));
+  const pending=f.q.dispatchOne();
+  await ready;
+  await f.q.dispatchLocalQuery();
+  assert.equal(f.q.jobs.get('om_query').status,'queued');
+  assert.equal(f.injected.length,0);
+  release();await pending;
+  const after=f.open();f.setNow(20000);
+  assert.equal(await after.dispatchOne(),false);
+  assert.equal(await after.dispatchLocalQuery(),true);
+  assert.equal(after.jobs.get('om_query').status,'done');
+  assert.equal(after.jobs.get('om_query').localReply,true);
+  assert.equal(after.jobs.get('om_query').markerSeen,undefined);
+  assert.equal(builds,1);
+  assert.equal(sends.length,2);
+  assert.deepEqual(sends[0],sends[1]);
+  assert.deepEqual(f.injected,['om_task']);
+});
 test('one shared progress record goes to the latest input and closes the old card',async t=>{
   const updates=[],finals=[];
   const f=fixture(t,{progress:async(text,key,context)=>updates.push({text,key,...context}),final:async(...args)=>finals.push(args)});

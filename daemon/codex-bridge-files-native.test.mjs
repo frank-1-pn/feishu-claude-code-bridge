@@ -53,6 +53,9 @@ test('unknown delivery expires before UUID dedup window and emits one source-bou
  const out=f.open({request:async()=>{calls++;throw Object.assign(Error('offline'),{code:'ECONNRESET'});}});await out.flush();
  f.advance(55*60*1000);await out.flush();assert.equal(f.state(item.key).status,'blocked');assert.equal(calls,1);
  await out.flush();await out.flush();assert.equal(f.notices.length,1);assert.equal(f.notices[0][2],f.job.id);assert.match(f.notices[0][0],/状态尚未确认/);
+ assert.equal(out.stats().file_failed_count,1);
+ assert.equal(out.stats().file_active_failed_count,0);
+ assert.equal(out.stats().file_historical_unresolved_count,1);
 });
 
 test('pre-upgrade jobs keep chat endpoint and UUID; old unknown legacy jobs are not resent after an hour',async t=>{
@@ -76,6 +79,8 @@ test('unsupported topic degrades to quote while permission errors never become u
  assert.equal(f.state(item.key).status,'done');assert.equal(f.calls[0].args[1],'+messages-reply');assert.ok(!f.calls[0].args.includes('--reply-in-thread'));
  const g=fixture(t),other=g.enqueue();let denied=0;const out=g.open({request:async()=>{denied++;throw apiError(230050);}});await out.flush();await out.flush();await out.flush();
  assert.equal(denied,1);assert.equal(g.state(other.key).status,'blocked');assert.equal(g.notices.length,1);
+ assert.equal(out.stats().file_active_failed_count,1);
+ assert.equal(out.stats().file_historical_unresolved_count,0);
 });
 
 test('route scope, binding and payload tampering are blocked before network',async t=>{

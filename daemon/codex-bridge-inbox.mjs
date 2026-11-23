@@ -64,9 +64,46 @@ export class DurableInbox {
       sequence: Math.max(0,...[...this.jobs.values()].map(j=>j.sequence??0))+1 };
     this.save(job); this.jobs.set(id, job); return job;
   }
+  isLocalQuery(job) {
+    return Boolean(job.statusQuery || this.io.isLocalQuery?.(job));
+  }
+  async dispatchLocalQuery() {
+    if(this.dispatchingLocalQuery)return false;
+    const j=[...this.jobs.values()].find(job=>job.status==='queued' && this.isLocalQuery(job)
+      && (job.retryAt??0)<=this.now());
+    if(!j)return false;
+    this.dispatchingLocalQuery=true;
+    try {
+      if(!j.statusQuery){
+        const response=await this.io.localQuery(j);
+        if(!response?.text){
+          // The authorized query disappeared or changed scope before reading.
+          // Do not move an explicit status query into the model lane.
+          throw Object.assign(Error('status_query_unavailable'),{permanent:true});
+        }
+        j.statusQuery={text:response.text,replyKey:digest(`status-query\0${this.bot}\0${j.id}`)};
+        this.save(j);
+      }
+      const {text,replyKey}=j.statusQuery;
+      const receipt=path.join(this.dir,`sent-${replyKey}.json`);
+      if(!fs.existsSync(receipt)){
+        await (this.io.sendLocalQuery??this.io.send)(text,replyKey,{jobId:j.id,job:j});
+        atomicJson(receipt,{sentAt:this.now(),local:true});
+      }
+      const done={...j,status:'done',completedAt:this.now(),localReply:true,replyKey};
+      delete done.statusQuery;delete done.error;delete done.retryAt;
+      this.save(done);Object.assign(j,done);delete j.statusQuery;delete j.error;delete j.retryAt;
+      return true;
+    }catch(error){
+      recordFailure(j,error,this.now());
+      if(j.blocked)j.status='failed';
+      this.save(j);
+      return false;
+    }finally{this.dispatchingLocalQuery=false;}
+  }
   async dispatchOne() {
     if (this.dispatching) return false;
-    const j = [...this.jobs.values()].find(j => j.status === 'queued');
+    const j = [...this.jobs.values()].find(j => j.status === 'queued' && !this.isLocalQuery(j));
     if (!j || (j.retryAt ?? 0) > this.now()) return false;
     this.dispatching = true;
     try {
