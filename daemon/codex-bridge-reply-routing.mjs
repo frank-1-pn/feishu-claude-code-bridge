@@ -72,7 +72,7 @@ export function selectReplyRoute(binding, jobs, { allJobs = jobs, mode = binding
 
 export function replyRouteNotice(route) {
   if (route?.reason === 'mixed_topics') return `本次合并答复涉及 ${route.sourceCount} 条消息（来自不同话题），统一展示在主聊天。`;
-  if (route?.sourceCount > 1) return `本次合并答复对应 ${route.sourceCount} 条连续消息，引用其中第一条。`;
+  if (route?.sourceCount > 1) return `本次合并答复对应 ${route.sourceCount} 条连续消息。`;
   return '';
 }
 

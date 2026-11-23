@@ -27,6 +27,21 @@ test('three messages dispatch before first final; one combined response is sent 
   f.append(marker('a'),marker('b'),marker('c'),answer()); await f.q.watch(); await f.q.deliverReplies();
   assert.equal(f.sent.length,1);assert.equal(f.q.stats().completed_count,3);
 });
+test('one shared progress record goes to the latest input and closes the old card',async t=>{
+  const updates=[],finals=[];
+  const f=fixture(t,{progress:async(text,key,context)=>updates.push({text,key,...context}),final:async(...args)=>finals.push(args)});
+  f.q.enqueue(event('old'));await f.q.dispatchOne();
+  f.append(marker('old'),answer('first','commentary'));await f.q.watch();
+  f.q.enqueue(event('latest'));await f.q.dispatchOne();
+  f.append(marker('latest'),answer('same rollout record','commentary'));
+  const q=f.open();await q.watch();
+  assert.deepEqual(updates.map(x=>x.jobId),['om_old','om_latest']);
+  assert.deepEqual(updates[1].supersededKeys,[updates[0].key]);
+  f.append(answer('final'));await q.watch();await q.deliverReplies();
+  assert.equal(finals.length,1);
+  assert.equal(finals[0][3].jobId,'om_latest');
+  assert.deepEqual(finals[0][2],[updates[1].key,updates[0].key]);
+});
 test('distinct turns receive distinct answers; unrelated early final is ignored',async t=>{
   const f=fixture(t); f.q.enqueue(event('a')); await f.q.dispatchOne();
   f.append(answer('unrelated'),marker('a'),answer('A'));

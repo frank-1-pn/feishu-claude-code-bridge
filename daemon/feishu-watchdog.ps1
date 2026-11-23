@@ -30,9 +30,9 @@ try {
     $check = Invoke-Runtime 'status-codex-bridge.ps1'
     $attempts = 0
     # Read-only probes still run during cooldown, so natural recovery is noticed.
-    if (-not $check.Data.healthy -and $previous.next_retry_at -gt $now) { exit 1 }
+    $cooldown = (-not $check.Data.healthy -and $previous.next_retry_at -gt $now)
     $bindings = Read-Json (Join-Path $RuntimeDir 'codex-thread-bindings.json')
-    while (-not $check.Data.healthy -and $attempts -lt 3) {
+    while (-not $cooldown -and -not $check.Data.healthy -and $attempts -lt 3) {
         if ($attempts -gt 0) { Start-Sleep -Milliseconds (1000 * [math]::Pow(2, $attempts) + (Get-Random -Minimum 0 -Maximum 500)) }
         $attempts++
         if (-not $check.Data.bridge.exact_identity -or -not $check.Data.bridge.heartbeat_fresh) {
@@ -62,26 +62,44 @@ try {
     # Startup grace prevents restart storms; it is not proof of connectivity.
     $hasSocketProbe = $null -ne $check.Data.PSObject.Properties['transport_healthy']
     $healthy = [bool]($check.Data.healthy -and (-not $hasSocketProbe -or $check.Data.transport_healthy))
-    $failures = if ($healthy) { 0 } else { [int]$previous.consecutive_failures + 1 }
+    # The socket probe already bounds startup/reconnect grace. Counting that
+    # grace as an outage here caused false alerts and conflicting retry gates.
+    $recovering = [bool]($check.Data.healthy -and -not $healthy)
+    $failures = if ($healthy -or $recovering) { 0 } elseif ($cooldown) { [int]$previous.consecutive_failures } else { [int]$previous.consecutive_failures + 1 }
     $delay = if ($healthy) { 0 } else { [int][math]::Min(600, 60 * [math]::Pow(2, [math]::Min($failures - 1, 4))) }
+    $reasons = @()
+    if (-not $check.Data) { $reasons += 'status_probe_unavailable' }
+    else {
+        if (-not $check.Data.bridge.exact_identity) { $reasons += 'bridge_identity_invalid' }
+        if ($check.Data.bridge.worker_count -gt 1) { $reasons += 'bridge_multiple_writers' }
+        if (-not $check.Data.bridge.heartbeat_fresh) { $reasons += 'bridge_heartbeat_stale' }
+        foreach ($bot in $check.Data.bots) {
+            if (-not $bot.daemon_healthy -or ($hasSocketProbe -and -not $bot.socket_verified)) { $reasons += "$($bot.bot):$($bot.socket_signal)" }
+            if ($bot.PSObject.Properties['event_log_exists'] -and -not $bot.event_log_exists) { $reasons += "$($bot.bot):event_log_missing" }
+            if ($bot.PSObject.Properties['cwd_exists'] -and -not $bot.cwd_exists) { $reasons += "$($bot.bot):cwd_missing" }
+        }
+    }
     $state = [ordered]@{
         checked_at = [DateTimeOffset]::UtcNow.ToString('o')
         healthy = $healthy
+        recovering = $recovering
+        cooldown = [bool]$cooldown
+        reasons = @($reasons)
         delivery_healthy = [bool]$check.Data.delivery_healthy
         recovery_attempts = $attempts
         consecutive_failures = $failures
-        next_retry_at = if ($healthy) { 0 } else { $now + $delay }
+        next_retry_at = if ($healthy -or $recovering) { 0 } elseif ($cooldown) { [long]$previous.next_retry_at } else { $now + $delay }
         last_alert_at = [long]$previous.last_alert_at
         bridge_identity_ok = [bool]$check.Data.bridge.exact_identity
         bridge_heartbeat_fresh = [bool]$check.Data.bridge.heartbeat_fresh
     }
-    if (-not $healthy -and $failures -ge 3 -and -not $NoAlert -and $now - $state.last_alert_at -ge 1800) {
+    if (-not $healthy -and -not $recovering -and -not $cooldown -and $failures -ge 3 -and -not $NoAlert -and $now - $state.last_alert_at -ge 1800) {
         # Use the configured primary binding; never copy chat identifiers here.
         $target = $bindings.bindings.bot1
         if ($target.chat_id) {
             $textPath = Join-Path $env:TEMP "lark-watchdog-alert-$PID.txt"
             try {
-                $text = 'Feishu/Codex recovery still unhealthy. Check status-codex-bridge.ps1 and state/watchdog.json. Automatic retries remain enabled.'
+                $text = 'Feishu/Codex recovery failed after bounded retries: ' + ($reasons -join ', ') + '. Automatic retries remain enabled; details: state/watchdog.json.'
                 [System.IO.File]::WriteAllText($textPath, $text, (New-Object System.Text.UTF8Encoding($false)))
                 $arguments = @('-TextFile', $textPath, '-ChatId', [string]$target.chat_id)
                 if ($target.profile) { $arguments += @('-Profile', [string]$target.profile) }

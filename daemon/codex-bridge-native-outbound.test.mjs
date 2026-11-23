@@ -139,7 +139,36 @@ test('raw-card final binds native context before patching controls and retains t
   assert.equal(f.server.events[bind].p.nativeContext,'native_fixture');assert.match(JSON.stringify(f.server.displayedCards.at(-1)),/转待办/);
 });
 
-test('native controls bind only to the first final card in a merged turn',async t=>{
+test('merged progress retires the older visible card across restart before posting and finishing the latest card',async t=>{
+  const f=fixture(t);
+  f.outbound.progress('先前进度','old',f.route);await f.outbound.flushCards();
+  const older=finalState(f,'old'),newest={...f.route,messageId:'om_latest'};
+  let failed=false;
+  f.server.before=async call=>{
+    if(!failed && call.method==='PUT' && call.url.endsWith(older.cardId)){
+      failed=true;throw Object.assign(Error('temporarily offline'),{code:'ETIMEDOUT'});
+    }
+  };
+  await f.outbound.handoffProgress('共享进度','latest',newest,{position:20,supersededKeys:['old']});
+  await f.outbound.flushCards();
+  assert.equal(sentCalls(f).length,1);
+  ({outbound:f.outbound}=f.reload());f.clock.now+=10000;
+  await f.outbound.flushCards();
+  assert.equal(finalState(f,'old').cardClosed,true);
+  assert.equal(finalState(f,'old').lastAppliedCard.header.title.content,'已转到最新卡片');
+  assert.equal(sentCalls(f).length,2);
+  assert.match(sentCalls(f).at(-1).url,/om_latest\/reply$/);
+  const latest=finalState(f,'latest').messageId;
+  await f.outbound.final('合并结果','answer',['latest','old'],{replyRoute:newest});
+  f.outbound.progress('迟到旧进度','old',f.route,{position:30});
+  await f.outbound.flushCards();
+  assert.equal(sentCalls(f).length,2);
+  assert.equal(finalState(f,'latest').messageId,latest);
+  assert.equal(finalState(f,'latest').finalDelivered,true);
+  assert.equal(finalState(f,'old').lastAppliedCard.header.title.content,'已转到最新卡片');
+});
+
+test('native controls bind only to the latest final card in a merged turn',async t=>{
   const f=fixture(t);f.outbound.progress('先前进度一','a',f.route);f.outbound.progress('先前进度二','b',f.route);await f.outbound.flushCards();
   await f.outbound.final('合并结果','answer',['a','b'],{replyRoute:f.route,actionContext:'legacy',nativeContext:'native_fixture',
     interactions:[{tag:'button',text:{tag:'plain_text',content:'转待办'}}]});

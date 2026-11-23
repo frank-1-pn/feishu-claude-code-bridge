@@ -153,10 +153,11 @@ export class DurableInbox {
         }
       }
       if (message?.phase === 'commentary') {
-        j.streamKey = digest(`${this.bot}\0${j.rollout}\0${j.turnId ?? j.id}`);
+        j.streamKey ??= digest(`progress\0${this.bot}\0${j.id}`);
         const progress={text:message.text,key:j.streamKey,at,observedAt,position:absoluteEnd};
         const prior=j.pendingProgress?.events??(j.pendingProgress?[j.pendingProgress]:[]);
         j.pendingProgress={...progress,events:[...prior,progress].slice(-12)};
+        j.progressPositions=[...(j.progressPositions??[]),absoluteEnd].slice(-12);
       }
       const completion = rolloutTaskCompletion(item);
       if (message?.phase === 'final_answer' || completion?.kind === 'final') {
@@ -192,14 +193,38 @@ export class DurableInbox {
         j.timeoutNotified = true; this.save(j);
       }
     }
-    for (const j of this.jobs.values()) {
-      if (!j.pendingProgress) continue;
-      try {
-        for(const progress of j.pendingProgress.events??[j.pendingProgress])
-          await this.io.progress?.(progress.text,progress.key,{jobId:j.id,job:j,at:progress.at,observedAt:progress.observedAt,position:progress.position});
-        delete j.pendingProgress; this.save(j);
-      } catch { /* Saved snapshot is retried after restart. */ }
+    const pending=[...this.jobs.values()].filter(j=>j.pendingProgress);
+    const sharedEvents=new Map();
+    for(const job of pending)for(const event of job.pendingProgress.events??[job.pendingProgress]){
+      const id=JSON.stringify([job.rollout,event.position ?? event.key]);
+      if(!sharedEvents.has(id))sharedEvents.set(id,{job,event});
     }
+    const peersByEvent=new Map();
+    for(const job of this.jobs.values()){
+      const positions=new Set([...(job.progressPositions??[]),
+        ...(job.pendingProgress?.events??(job.pendingProgress?[job.pendingProgress]:[])).map(event=>event.position??event.key)]);
+      for(const position of positions){
+        const id=JSON.stringify([job.rollout,position]);
+        if(!sharedEvents.has(id))continue;
+        if(!peersByEvent.has(id))peersByEvent.set(id,[]);
+        peersByEvent.get(id).push(job);
+      }
+    }
+    try {
+      for(const [id,{job,event}] of [...sharedEvents].sort((a,b)=>(a[1].event.position??0)-(b[1].event.position??0))){
+        const peers=peersByEvent.get(id)??[job];
+        const latest=peers.at(-1);
+        const olderKeys=new Set(peers.slice(0,-1).map(peer=>peer.streamKey).filter(Boolean));
+        // Pre-upgrade peers can share a turn-level key anchored to the older message.
+        if(olderKeys.has(latest.streamKey)){
+          latest.streamKey=digest(`progress\0${this.bot}\0${latest.id}`);
+          this.save(latest);
+        }
+        await this.io.progress?.(event.text,latest.streamKey??event.key,{jobId:latest.id,job:latest,jobs:peers,
+          at:event.at,observedAt:event.observedAt,position:event.position,supersededKeys:[...olderKeys]});
+      }
+      for(const j of pending){delete j.pendingProgress;this.save(j);}
+    } catch { /* Checkpoints are replayed without repeating a visible revision. */ }
   }
   async deliverReplies() {
     for (const j of this.jobs.values()) {
@@ -218,9 +243,14 @@ export class DurableInbox {
         j.replyRetry = fs.existsSync(retryFile) ? JSON.parse(fs.readFileSync(retryFile, 'utf8')) : (j.replyRetry ?? {});
         if (j.replyRetry.blocked || (j.replyRetry.retryAt ?? 0) > this.now()) continue;
         try {
-          const streamKeys = [...this.jobs.values()].filter(other => other.replyKey === j.replyKey).map(other => other.streamKey).filter(Boolean);
           const peers=[...this.jobs.values()].filter(other=>other.replyKey===j.replyKey);
-          await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys, {jobId:j.id,replyKey:j.replyKey,jobs:peers});
+          const latest=peers.at(-1);
+          if(peers.length>1 && !latest.streamKey){
+            latest.streamKey=digest(`progress\0${this.bot}\0${latest.id}`);
+            this.save(latest);
+          }
+          const streamKeys=peers.map(other=>other.streamKey).filter(Boolean).reverse();
+          await (this.io.final ?? this.io.send)(j.reply, j.replyKey, streamKeys, {jobId:latest.id,replyKey:j.replyKey,jobs:peers});
           atomicJson(receipt, { sentAt: this.now() });
         } catch (error) { recordFailure(j.replyRetry, error, this.now()); atomicJson(retryFile,j.replyRetry); this.save(j); continue; }
       }

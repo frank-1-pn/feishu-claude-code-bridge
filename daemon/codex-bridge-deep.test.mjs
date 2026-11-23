@@ -182,7 +182,9 @@ test('installed CLI accepts card patch JSON through stdin in dry-run mode',{skip
   const exe=path.join(process.env.APPDATA,'npm','node_modules','@larksuite','cli','bin','lark-cli.exe');
   const result=await capture(exe,['api','PATCH','/open-apis/im/v1/messages/om_fixture','--data','-','--as','bot','--dry-run'],
     {input:JSON.stringify({content:JSON.stringify({config:{update_multi:true},elements:[{tag:'div',text:{tag:'plain_text',content:'fixture'}}]})}),env:{...process.env,LARK_CLI_NO_PROXY:'1'}});
-  assert.equal(result.code,0);assert.match(result.stdout,/Dry Run/i);assert.match(result.stdout,/PATCH/);assert.match(result.stdout,/update_multi/);
+  assert.equal(result.code,0);
+  assert.ok(/Dry Run/i.test(result.stdout) || /"dry_run"\s*:\s*true/.test(result.stdout),'CLI confirmed dry-run');
+  assert.ok(result.stdout.includes('PATCH') && result.stdout.includes('update_multi'),'CLI retained patch payload');
 });
 
 test('actual subscriber launch appends across restarts without losing unread bytes',async t=>{

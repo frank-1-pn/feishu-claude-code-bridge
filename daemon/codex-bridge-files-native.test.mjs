@@ -28,9 +28,16 @@ const apiError=code=>Object.assign(Error('private server message'),{apiCode:code
 
 test('native file/image/audio/video replies keep source association, profile, cover and immutable bytes',async t=>{
  const f=fixture(t);f.job.event.thread_id='omt_existing';for(const mode of ['file','image','audio','video'])f.enqueue(mode);
- fs.writeFileSync(f.file,'edited after queue');await f.open().flush();assert.equal(f.calls.length,4);
+ fs.writeFileSync(f.file,'edited after queue');
+ await f.open({request:async(b,args,cwd)=>{
+  assert.ok(!cwd.startsWith(f.outRoot),'CLI upload must leave the protected outbox');
+  const flag=['--file','--image','--audio','--video'].find(flag=>args.includes(flag));
+  assert.equal(fs.readFileSync(path.join(cwd,args[args.indexOf(flag)+1]),'utf8'),'immutable source bytes');
+  if(args.includes('--video-cover'))assert.equal(fs.readFileSync(path.join(cwd,args[args.indexOf('--video-cover')+1]),'utf8'),'cover bytes');
+  return f.request(b,args,cwd);
+ }}).flush();assert.equal(f.calls.length,4);
  for(const {args,cwd} of f.calls){assert.equal(args[1],'+messages-reply');assert.equal(args[3],'om_source');assert.ok(args.includes('--reply-in-thread'));
-  const flag=['--file','--image','--audio','--video'].find(flag=>args.includes(flag));assert.equal(fs.readFileSync(path.join(cwd,args[args.indexOf(flag)+1]),'utf8'),'immutable source bytes');}
+  assert.equal(fs.existsSync(cwd),false);}
  assert.ok(f.calls.find(c=>c.args.includes('--video')).args.includes('--video-cover'));
 });
 

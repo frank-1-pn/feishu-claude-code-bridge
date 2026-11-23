@@ -5,6 +5,13 @@ import { cliFailure } from './codex-bridge-retry.mjs';
 // Generic CLI API failures can be written to stderr with no JSON stdout. Keep
 // only recognized error metadata; never return or log the raw diagnostic text.
 export function larkDiagnostic(value) {
+  try {
+    const error=JSON.parse(value.trim().replace(/^\uFEFF/,'')).error;
+    if(error?.type==='validation' && error?.subtype==='invalid_argument'
+        && ['--file','--image','--audio','--video','--video-cover'].includes(error.param)
+        && typeof error.message==='string' && error.message.includes('inside the CLI config directory'))
+      return {code:'attachment_cli_protected_path',type:'validation'};
+  } catch { /* Some CLI errors use plain stderr. */ }
   const permission = /\b(99991672|99991668)\b/.exec(value);
   if(permission)return {code:Number(permission[1]),type:'permission'};
   const code=/(?:code|Code)[\s=:"']{1,8}(\d{5,10})\b/.exec(value);

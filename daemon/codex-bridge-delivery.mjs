@@ -19,7 +19,10 @@ export function createReplyDelivery({ binding, actions, outbound, files, reportO
     const presentation={status:ux.status};
     if(getRoute){
       try{
-        const route=await getRoute(context);
+        const grouped=await getRoute(context);
+        const route=grouped?.reason==='grouped_turn'
+          ? {...await getRoute({jobId:context.jobId}),sourceCount:grouped.sourceCount,sourceMessageIds:grouped.sourceMessageIds}
+          : grouped;
         if(route){
           presentation.replyRoute=route;
           const notice=replyRouteNotice(route);

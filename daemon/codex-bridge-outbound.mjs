@@ -81,13 +81,37 @@ export class DurableOutbound {
     }
     s.revision++; atomicWriteJson(file, s);
   }
-  async flushCards() {
-    for (const name of fs.readdirSync(this.root).filter(n => /^card-[a-f0-9]+\.json$/.test(n))) {
+  handoffProgress(text,key,route,metadata) {
+    return this.serial(()=>{
+      for(const older of metadata.supersededKeys??[])if(older!==key)this.supersede(older,key);
+      this.progress(text,key,route,metadata);
+    });
+  }
+  supersede(key, successor) {
+    const file=this.file('card',key), state=this.read(file);
+    if(!state || state.final || state.supersededBy)return;
+    state.supersededBy=successor;
+    state.final=true;
+    state.text='后续进度和结果请看本次任务的最新卡片。';
+    state.presentation={status:'superseded',interactions:[]};
+    state.revision++;
+    atomicWriteJson(file,state);
+  }
+  async flushCards({retiredOnly=false}={}) {
+    const cards=fs.readdirSync(this.root).filter(n=>/^card-[a-f0-9]+\.json$/.test(n))
+      .map(name=>path.join(this.root,name));
+    const retiring=cards.filter(file=>this.read(file).supersededBy);
+    for (const file of retiredOnly?retiring:[...new Set([...retiring,...cards])]) {
       await this.serial(async () => {
-        const file = path.join(this.root, name), s = this.read(file);
-        if (s.final || s.blocked || s.sentRevision === s.revision || (s.retryAt ?? 0) > this.now()
-            || (s.lastSentAt && this.now() - s.lastSentAt < this.minIntervalMs)) return;
-        try { await this.updateCard(file, s, false); }
+        const s=this.read(file);
+        const retiring=Boolean(s.supersededBy && (s.messageId || s.deliveryUncertain));
+        if ((s.final && !retiring) || s.blocked || s.sentRevision === s.revision || (s.retryAt ?? 0) > this.now()
+            || (!retiring && s.lastSentAt && this.now() - s.lastSentAt < this.minIntervalMs)) return;
+        if(!retiring && !s.messageId && cards.some(other=>{
+          const old=this.read(other);
+          return old.supersededBy===s.key && (old.messageId || old.deliveryUncertain) && !old.blocked && old.sentRevision!==old.revision;
+        }))return;
+        try { await this.updateCard(file, s, retiring); }
         catch (error) {
           // Merge failures with progress that may have arrived during network I/O.
           const latest = this.read(file); recordFailure(latest, error, this.now());
@@ -156,6 +180,12 @@ export class DurableOutbound {
         if(s.messageId)try{await this.updateCard(file,s,true);}catch{}
       });
       keys=[];
+    }
+    if(keys.length>1){
+      const [latest,...older]=keys;
+      await this.serial(()=>{for(const key of older)this.supersede(key,latest);});
+      await this.flushCards({retiredOnly:true});
+      keys=[latest];
     }
     if(!keys.length && this.presentationEnabled) keys.push(`reply:${replyKey}`);
     for (const key of keys) {

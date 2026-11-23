@@ -3,6 +3,7 @@
 const STATUS = Object.freeze({
   queued: '已排队', working: '正在处理', searching: '正在检索',
   organizing: '正在整理', waiting: '等待补充', complete: '处理完成', error: '处理遇到问题',
+  superseded: '已转到最新卡片',
 });
 
 export function safeHttpUrl(value) {

@@ -1210,8 +1210,11 @@ async function durableBotLoops(binding) {
     },
     send: (text,key,context) => outbound.text(text,key,getRoute(context)),
     final,
-    progress: (text,key,context) => outbound.progress(text,key,getRoute({jobId:context?.jobId,
-      jobs:[...inbox.jobs.values()].filter(job=>job.streamKey===key)}),context),
+    progress: (text,key,context) => {
+      const grouped=getRoute(context);
+      const route=grouped.reason==='mixed_topics'?grouped:getRoute({jobId:context.jobId});
+      return outbound.handoffProgress(text,key,route,context);
+    },
     log,
   }, { timeoutMs: config.runtime.pty_turn_timeout_ms });
   // Private pending jobs are tied to the originating mapping. Rebinding a bot

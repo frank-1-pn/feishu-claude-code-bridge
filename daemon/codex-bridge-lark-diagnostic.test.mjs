@@ -11,6 +11,12 @@ test('stderr diagnostic extracts numeric code and optional type without retainin
   assert.equal(larkDiagnostic('message ID 123456789012345 and process ID 1234'),undefined);
 });
 
+test('CLI protected path validation is a definite rejection, without exposing the path',()=>{
+  const raw=JSON.stringify({ok:false,error:{type:'validation',subtype:'invalid_argument',
+    param:'--file',message:`${secret} is inside the CLI config directory`}});
+  assert.deepEqual(larkDiagnostic(raw),{code:'attachment_cli_protected_path',type:'validation'});
+});
+
 test('real child-process stderr is reduced to safe metadata, even when an API code spans chunks',async()=>{
   const js=`process.stderr.write('access_token=${secret} code: 9999');setTimeout(()=>{process.stderr.write('1672 app_secret=${secret}');process.exitCode=1;},10);`;
   const result=await capture(process.execPath,['-e',js],{timeoutMs:3000});

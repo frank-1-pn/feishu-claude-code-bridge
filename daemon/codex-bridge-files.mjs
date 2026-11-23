@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { digest } from './codex-bridge-inbox.mjs';
 import { atomicWriteJson } from './codex-bridge-storage.mjs';
@@ -9,6 +10,38 @@ const permanent = code => Object.assign(new Error(code), { code, permanent: true
 export function within(root, file) {
   const rel = path.relative(root, file);
   return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
+}
+
+// The CLI protects its configuration directory. Send only the verified
+// outbox payload from a unique staging directory outside that tree.
+async function withUploadPayload(dir, attachments, send) {
+  const root=fs.realpathSync(os.tmpdir());
+  const staged=fs.mkdtempSync(path.join(root,'feishu-upload-'));
+  const files=[];
+  try {
+    for(const {name,hash,limit,changed} of attachments){
+      if(!name || name==='.' || name==='..' || path.basename(name)!==name)throw permanent(changed);
+      const source=fs.realpathSync(path.join(dir,name));
+      if(!within(dir,source))throw permanent(changed);
+      const info=fs.statSync(source);
+      if(!info.isFile() || info.size<1 || info.size>limit)throw permanent(changed);
+      const bytes=fs.readFileSync(source);
+      if(bytes.length>limit || digest(bytes)!==hash)throw permanent(changed);
+      const target=path.join(staged,name);
+      files.push(target);
+      fs.writeFileSync(target,bytes,{flag:'wx',mode:0o600});
+    }
+    return await send(staged);
+  } finally {
+    // Cleanup cannot invalidate an acknowledged message or trigger a resend.
+    for(const file of files)try { fs.unlinkSync(file); } catch {}
+    try { fs.rmdirSync(staged); } catch {}
+  }
+}
+
+function isProtectedSource(real) {
+  const config=path.join(os.homedir(),'.lark-cli');
+  return within(config,real) || (fs.existsSync(config) && within(fs.realpathSync(config),real));
 }
 
 // The report path is supplied only by the runtime. Neither model text nor a
@@ -65,7 +98,7 @@ export function enqueueFile({ root, inboxRoot, binding, jobId, file, mode = 'fil
   const roots = [binding.cwd, ...(binding.outbound_roots ?? [])].map(p => fs.realpathSync(p));
   const verify = (p, limit) => {
     const real = fs.realpathSync(p);
-    if (!roots.some(r => within(r, real))) throw permanent('attachment_outside_allowed_roots');
+    if (isProtectedSource(real) || !roots.some(r => within(r, real))) throw permanent('attachment_outside_allowed_roots');
     const info = fs.statSync(real);
     if (!info.isFile() || info.size < 1 || info.size > limit) throw permanent('attachment_size_invalid');
     const bytes = fs.readFileSync(real);
@@ -165,22 +198,24 @@ export class FileOutbox {
         if ((s.origin && !matchesOrigin(s.origin, this.binding)) || (s.generatedReport && !s.origin)) throw permanent('attachment_binding_mismatch');
         const scope=digest(JSON.stringify(bindingSnapshot(this.binding)));
         if(s.deliveryVersion===2&&s.bindingScope!==scope)throw permanent('attachment_binding_mismatch');
-        const dir = path.join(path.dirname(file),'payload'), source = path.resolve(dir, s.name);
-        if (!within(dir, fs.realpathSync(source)) || digest(fs.readFileSync(source)) !== s.hash) throw permanent('attachment_snapshot_changed');
+        const dir = path.join(path.dirname(file),'payload');
+        if(fs.realpathSync(dir)!==path.join(fs.realpathSync(path.dirname(file)),'payload'))
+          throw permanent('attachment_snapshot_changed');
+        if(!['file','image','audio','video'].includes(s.mode))throw permanent('invalid_attachment_request');
+        const attachments=[{name:s.name,hash:s.hash,limit:(s.mode==='image'?10:30)*1024*1024,changed:'attachment_snapshot_changed'}];
         const args = ['im', '+messages-send', '--chat-id', this.binding.chat_id, `--${s.mode}`, `./${s.name}`,
           '--idempotency-key', s.key.slice(0, 32)];
         if (s.mode === 'video') {
-          const preview = fs.realpathSync(path.join(dir, s.coverName));
-          if (!within(dir, preview) || digest(fs.readFileSync(preview)) !== s.coverHash) throw permanent('attachment_cover_changed');
+          attachments.push({name:s.coverName,hash:s.coverHash,limit:10*1024*1024,changed:'attachment_cover_changed'});
           args.push('--video-cover', `./${s.coverName}`);
         }
-        if(this.getRoute)await this.sendRouted(file,s,args,dir,scope);
-        else {
+        await withUploadPayload(dir,attachments,async uploadDir=>{
+          if(this.getRoute)return this.sendRouted(file,s,args,uploadDir,scope);
           // An optional-routing upgrade later must retain the endpoint of a
           // chat send that may have succeeded before the response was lost.
           s.legacySendStartedAt??=this.now();atomicWriteJson(file,s);
-          await this.request(this.binding, args, dir);
-        }
+          await this.request(this.binding, args, uploadDir);
+        });
         s.status = 'done'; s.completedAt = this.now(); delete s.error;
       } catch (error) { recordFailure(s, error, this.now()); if (s.blocked) s.status = 'blocked'; }
       atomicWriteJson(file, s);
