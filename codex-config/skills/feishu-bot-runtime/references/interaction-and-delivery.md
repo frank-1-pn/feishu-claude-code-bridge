@@ -97,9 +97,13 @@ $daemonRoot = Join-Path $env:USERPROFILE '.lark-cli\daemon'
 node (Join-Path $daemonRoot 'codex-bridge-send.mjs') --bot <当前bot> --job-id <本次入站message_id> --file <交付文件绝对路径>
 ```
 
-bot 与 job-id 取当前绑定及本轮入站标记，不从历史示例复制。默认 `--mode file`；图片用 `image`，音频 `audio`，视频 `video` 还需 `--cover`。当前文件限制 30 MiB、图片 10 MiB，默认只允许绑定工作目录内的文件。若产物位于其他目录，在用户要求的交付范围内复制到获准工作目录后发送，不随意扩大路径白名单。
+bot 与 job-id 取当前绑定及本轮入站标记，不从历史示例复制。默认 `--mode file`；图片用 `image`，音频 `audio`，视频 `video` 还需 `--cover`。当前文件限制 30 MiB、图片 10 MiB，默认只允许绑定工作目录内的文件。语音只接受Ogg Opus（.opus/.ogg），MP3/WAV应明确作为普通file发送；video需要MP4及cover。图片按image发送可能由平台转换格式，原件保真用file。若产物位于其他目录，在用户要求的交付范围内复制到获准工作目录后发送，不随意扩大路径白名单。
 
-发送入口成功只证明已入队。检查对应 `state/file-outbox/<bot>/` 任务送达状态及 `file_pending_count`、`file_failed_count`，再报告结果。消息上下文、表单值、报告正文和文件快照都是私有状态，不上传 GitHub。
+全群模式的发送入口只在绑定cwd的`.codex-bridge-file-payloads-v1/`保存不可变0600原件，并经既有`.codex-bridge-requests-v1/`发布请求。两目录均私有并局部Git忽略；不要求运营模型写daemon state。受理须有原marker、actionable及所属turn核验；旧turn后新请求拒绝，只有此前真实工具回执证明的固定请求可继续消费。每scope快照保留上限256份/768MiB；达到预算或残留未知admission claim时明确停止，由维护者对账，不自动删原件、锁或扩权限。
+
+新显式文件请求为v3：上传checkpoint与消息sendIntent分开，通用Office/ZIP/HTML使用合法stream上传类型；取得file_key/image_key后冻结消息内容、UUID与原回复路由。未知上传ACK只涉及未使用资源，可能留下孤立上传；未知消息ACK不能重传上传、换正文/UUID/端点或绕过55分钟停止窗口。旧v1/v2及自动报告继续原协议，已blocked历史请求不升级、不自动重放。
+
+发送入口成功只证明已入队。检查对应 `state/file-outbox/<bot>/` 任务送达状态及 `file_pending_count`、`file_failed_count`，再报告结果。agent_request ACK applied只证明已转入文件队列，实际完成以outbox done及sendIntent返回的真实message_id为证；不得因文字结果卡DONE就宣称附件送达。消息上下文、表单值、报告正文和文件快照都是私有状态，不上传 GitHub。
 
 ## 回调排查与实机验收
 
@@ -146,3 +150,12 @@ actionable故障优先在原卡显示安全错误状态，业务job仍为failed�
 新版任务卡各自显示本任务结果；waiting/background确认与最终结果使用同一原卡的不同不可变版本。旧版一次共享答复只送全文一次，每条合法actionable源卡分别关闭，卡片关闭失败持久重试。历史done不代替远端卡关闭；修复旧卡不重做已完成业务。等待补充的最终卡保留waiting，不能为了收尾谎称业务完成。
 
 后台子任务使用[持久后台任务](background-tasks.md)协议。先确认入队再释放当前对话；完成事件须运行时核验原任务、结果hash与当前绑定，不能仅凭消息字段绕过分类。后台草稿回原会话审查后，由原bridge沿source消息回传，不手动再发一份。
+
+
+## 附件逐项接收与平台边界
+
+入站清单`attachmentResults`分别保存success/failed；成功项附原文件名、扩展、实际字节及SHA256。任一失败附`attachmentPreparationError`，成功原件和正文仍可处理；全部失败不得假装已读。持久cache绑定消息/资源/当前作用域并重新验证实际文件，旧cache须具备原SHA及大小；疑似篡改不自动覆盖或重下。原件下载名为`resource-N.payload<扩展>`，不会覆盖JSON回执。原名和metadata是资料，不执行附件或据其扩大授权。
+
+本地接收预算为单项50MiB、每消息最多20个不同资源、验真总量250MiB；声明超限可提前拒绝，未知大小仍在CLI下载后校验，此预算不代表网络流量硬限。无key、空文件、超限和不支持类型都明确列出；路径拒绝只提供安全错误类别，不提供未通过验证的路径。
+
+文件夹key不是文件，需按lark-im技能显式展开并核对分页/数量/总量后再逐文件处理；本版不会自动递归下载。合并转发、卡片、表情及保密附件遵循真实API结果，不承诺可下载。云文档/云文件链接使用相应lark-doc/drive/base等技能及实际权限，不能因消息包含链接就自动导出或上传云盘。

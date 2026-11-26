@@ -122,7 +122,8 @@ export class NativeInteractions {
     const resources = normalizeEvent(event).resources;
     const files = resources.map((resource, index) => ({ resource, index })).filter(({ resource }) => resource.kind === 'file');
     let result;
-    if (files.length !== 1) result = { status: 'unavailable', code: 'voice_resource_ambiguous', fallback: '这条语音包含无法确定的音频资源，未自动执行。请重新发送一条语音或改发文字。' };
+    if (prepared.attachmentPreparationError) result = {status:'unavailable',code:prepared.attachmentPreparationError,fallback:'语音附件未完整接收，未自动转写或执行。请重新发送或改发文字。'};
+    else if (files.length !== 1) result = { status: 'unavailable', code: 'voice_resource_ambiguous', fallback: '这条语音包含无法确定的音频资源，未自动执行。请重新发送一条语音或改发文字。' };
     else {
       const cache = path.join(this.downloadRoot, this.binding.bot, digest(jobId), `resource-${files[0].index}.json`);
       const audioPath = JSON.parse(fs.readFileSync(cache, 'utf8')).saved_path;

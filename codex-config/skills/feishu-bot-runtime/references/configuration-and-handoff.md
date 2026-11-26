@@ -127,3 +127,8 @@ $bridgeStatus.bots | Select-Object bot, daemon_healthy, socket_verified,
 ### 多人上下文、联网来源与新版本统计
 
 按 [ops-round2.md](ops-round2.md) 配置独立 scoped collaboration、research 和 metrics policy。保持原绑定文件字节，不把接收全群成员理解为业务权限扩大。统计以固定 ref 的首次私有 intake 标签和真实响应证据限定新部署窗口；冻结后不能误解为仍采样，历史只作单列观察。联网只用实际检索并受限 GET 的公开白名单资料；无来源仍离线，网络失败不得伪称查证。安装须检查所有新增严格计数器，原会话自然空闲后由原 watchdog 恢复唯一 worker；真人群闭环仍独立验收。
+
+
+### 显式附件请求与分阶段交付
+
+新全群显式附件发送通过工作区不可变请求，由原AgentRequestDispatcher消费；安装须包含codex-bridge-file-requests及其依赖、send入口、agent-requests、inbox/media/native-runtime/prompt。增加模块时同步release profile，完整manifest重新从固定tested/published commit生成。安装不迁移旧blocked附件，不清除失败计数，不补发历史文件。已有保留故障必须单独固定原request/payload和来源证明；不能把活动故障填零或宣称healthy。详见interaction-and-delivery。

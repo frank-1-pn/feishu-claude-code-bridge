@@ -161,7 +161,9 @@ test('inbound cached file tampering is rejected before model dispatch',async t=>
   const {root,binding}=fixture(t);const {prepareInbound}=await import('./codex-bridge-media.mjs');let local;
   const options={downloadRoot:root,writeText:fs.writeFileSync,download:async(_,args,dir)=>{local=path.join(dir,'r.txt');fs.writeFileSync(local,'original');return{saved_path:local};}};
   const e={...evt('file'),message_type:'file',content:JSON.stringify({file_key:'file_v3_fixture',file_name:'test.txt'})};
-  await prepareInbound(binding,e,options);fs.writeFileSync(local,'changed');await assert.rejects(prepareInbound(binding,e,options),/cache_changed/);
+  await prepareInbound(binding,e,options);fs.writeFileSync(local,'changed');const prepared=await prepareInbound(binding,e,options);
+  assert.equal(prepared.attachmentPreparationError,'attachment_cache_changed');assert.equal(prepared.attachmentResults[0].status,'failed');
+  assert.equal(prepared.attachmentResults[0].saved_path,undefined);
 });
 
 test('CLI transport uses stdin, fixed profile, bot identity and classifies structured failures',async()=>{

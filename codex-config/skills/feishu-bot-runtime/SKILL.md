@@ -84,9 +84,11 @@ Orca CLI 在目标 Codex turn 正忙时可能先以非零状态退出，但 runt
 
 - 只处理绑定 chat 的消息；回复也只发回该 chat，并使用绑定 bot/profile。
 - 长消息末尾出现 `...(truncated)` 时，用 `lark-cli im +messages-mget --message-ids <om_xxx> --as bot` 取全文，不让用户重贴。带 profile 的 bot 在命令最前加 `--profile <name>`。
-- 自动 bridge 支持文本、图片、文件及 post 中的资源 key，并尝试下载 audio/video/media/sticker 资源；能下载不代表当前模型能直接理解音视频。通过绑定 bot/profile 下载到 `~/lark-downloads/codex-inbox/<bot>/<消息哈希>/`，校验实际路径和文件大小（接受上限 50 MiB）。图片提示 Codex 调用 view_image；文件提示按格式读取，不执行附件程序。未知类型、缺资源 key 或下载失败必须明确反馈，不可静默丢弃。
+- 自动 bridge 支持文本、图片、文件及 post 中的资源 key，并尝试下载 audio/video/media 资源；sticker、文件夹容器、合并转发及卡片资源不冒充普通可下载文件；能下载不代表当前模型能直接理解音视频。通过绑定 bot/profile 下载到 `~/lark-downloads/codex-inbox/<bot>/<消息哈希>/`，校验实际路径、大小和 SHA256（单项 50 MiB、每消息20项、总250 MiB）。单项失败保留其他成功项和正文，按 attachmentResults 逐项说明；不得将部分成功当全收齐。图片提示 Codex 调用 view_image；文件提示按格式读取，不执行附件程序。未知类型、缺资源 key 或下载失败必须明确反馈，不可静默丢弃。
 - bridge 用持久 inbox 去重入站；回包分片同时用稳定的 Feishu idempotency key。不要恢复旧 offset 就直接回滚 V1：V2 offset 表示持久入队，已不表示答复完成，必须先对账所有 pending/已投递任务。
 - 需要人工直接发消息时，同时遵循 `lark-im` skill 的收件人、正文和身份确认规则。
+
+文件发送工具在全群模式下把不可变原件快照和请求写入绑定cwd私有目录，由原worker核验scope、原marker、分类和所属turn后受理。queued/applied=false/delivered=false只证明请求保存。新请求分开记录上传与消息发送：上传成功才冻结resource key和消息正文；未知消息ACK保持原UUID/端点，超过窗口停止，不通过重新提交绕过。旧blocked附件不自动重发。
 
 ## 授权与高风险操作
 

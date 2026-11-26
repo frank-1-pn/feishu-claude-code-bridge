@@ -36,6 +36,7 @@
     "daemon/codex-bridge-fast-feedback.mjs",
     "daemon/codex-bridge-feedback.mjs",
     "daemon/codex-bridge-file-history.mjs",
+    "daemon/codex-bridge-file-requests.mjs",
     "daemon/codex-bridge-files.mjs",
     "daemon/codex-bridge-idle.mjs",
     "daemon/codex-bridge-inbox.mjs",

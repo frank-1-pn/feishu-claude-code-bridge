@@ -8,6 +8,8 @@ import {enqueueActionable,enqueueSilentCompletion,readDisposition} from './codex
 import {verifyBackgroundCompletion} from './codex-bridge-background.mjs';
 import {TaskResultStore} from './codex-bridge-task-results.mjs';
 import {rolloutAssistantMessage,rolloutTaskCompletion} from './codex-bridge-progress.mjs';
+import {attachmentRequestPayload,stageAttachmentRequest,readAttachmentRequest} from './codex-bridge-file-requests.mjs';
+import {enqueueImmutableAttachment} from './codex-bridge-files.mjs';
 
 export const AGENT_REQUEST_LIMITS=Object.freeze({maxBytes:96*1024,maxPending:128,maxFiles:8192});
 const fail=code=>{throw Object.assign(Error(code),{code});};
@@ -65,6 +67,7 @@ function sourceHash(job) {
 }
 function payload(kind,request) {
  if(['actionable','silent'].includes(kind)){if(request!==undefined)fail('agent_request_payload_invalid');return null;}
+ if(kind==='attachment')return attachmentRequestPayload(request);
  if(kind==='link'){
   if(!plain(request)||Object.keys(request).length!==1||!idValid(request.targetJobId))fail('agent_request_payload_invalid');return {...request};
  }
@@ -76,7 +79,7 @@ function payload(kind,request) {
  return {...request};
 }
 function key(ctx,jobId,kind,value) {
- return digest(`${ctx.scopeHash}\0${jobId}\0${['actionable','silent'].includes(kind)?'disposition':kind}${kind==='result'?'\0'+value.resultKey:''}`);
+ return digest(`${ctx.scopeHash}\0${jobId}\0${['actionable','silent'].includes(kind)?'disposition':kind}${kind==='result'?'\0'+value.resultKey:kind==='attachment'?'\0'+digest(stableJson(value)):''}`);
 }
 function validateJob(ctx,job,kind,{active=true}={}) {
  const disposition=readDisposition({root:path.join(ctx.stateRoot,'completions-v1'),binding:ctx.binding,job});
@@ -159,7 +162,7 @@ export function enqueueAgentRequest(options) {
  validateJob(ctx,job,options.kind);
  if(options.kind!=='silent')assertTurnOpen(ctx,job);
  if(job.event.synthetic_callback&&!job.event.background_completion)source(ctx,job.id,{currentAction:true});
- if(['result','link'].includes(options.kind)){
+ if(['result','link','attachment'].includes(options.kind)){
   const decisionFile=path.join(ctx.dir,`request-${key(ctx,job.id,'actionable',null)}.json`);
   if(fs.existsSync(decisionFile)&&json(decisionFile).kind==='silent')fail('agent_request_disposition_conflict');
  }
@@ -177,6 +180,14 @@ export function enqueueAgentRequest(options) {
  return {queued:true,duplicate:!created,applied:false,delivered:false,requestKey,requestHash:prior.requestHash};
 }
 
+// Attachment producer writes immutable bytes only under the authorized cwd.
+export function enqueueAgentAttachment(options) {
+ const ctx=context(options),job=source(ctx,options.jobId);validateJob(ctx,job,'attachment');assertTurnOpen(ctx,job);
+ if(job.event.synthetic_callback&&!job.event.background_completion)source(ctx,job.id,{currentAction:true});
+ const request=stageAttachmentRequest(ctx,options);
+ return enqueueAgentRequest({...options,kind:'attachment',request});
+}
+
 export class AgentRequestDispatcher {
  constructor(options){this.options=options;this.ctx=context(options);this.dir=this.ctx.dir;this.receiptDir=this.ctx.receiptDir;this.scopeHash=this.ctx.scopeHash;this.scanBlocked=0;}
  requests(){const ctx=context(this.options);if(ctx.scopeHash!==this.scopeHash)fail('agent_request_scope_changed');return files(ctx).map(name=>({name,file:path.join(ctx.dir,name)}));}
@@ -191,7 +202,7 @@ export class AgentRequestDispatcher {
      if(done){if(done.requestHash!==r.requestHash)fail('agent_request_receipt_invalid');continue;}list.push(r);
     }catch(error){if(error.code!=='agent_request_publication_pending')this.scanBlocked++;}
    }
-   list.sort((a,b)=>(['actionable','silent'].includes(a.kind)?0:a.kind==='link'?1:2)-(['actionable','silent'].includes(b.kind)?0:b.kind==='link'?1:2)||a.queuedAt-b.queuedAt||a.requestKey.localeCompare(b.requestKey));
+   list.sort((a,b)=>(['actionable','silent'].includes(a.kind)?0:a.kind==='link'?1:a.kind==='attachment'?2:3)-(['actionable','silent'].includes(b.kind)?0:b.kind==='link'?1:b.kind==='attachment'?2:3)||a.queuedAt-b.queuedAt||a.requestKey.localeCompare(b.requestKey));
    for(const r of list){
     try{
      const latest=context(this.options);if(latest.scopeHash!==ctx.scopeHash)fail('agent_request_scope_changed');
@@ -201,24 +212,28 @@ export class AgentRequestDispatcher {
      // turn ends, only its immutable real tool output proves this exact payload
      // existed before final. Later-turn output cannot authorize a new request.
      assertTurnOpen(latest,job,r);
-     if(['result','link'].includes(r.kind)&&!job.event.synthetic_callback&&job.feedbackDisposition!=='actionable')continue;
+     if(['result','link','attachment'].includes(r.kind)&&!job.event.synthetic_callback&&job.feedbackDisposition!=='actionable')continue;
      directories(ctx,{receipts:true});
      let result;
      if(r.kind==='actionable'||r.kind==='silent'){
       const prior=readDisposition({root:path.join(ctx.stateRoot,'completions-v1'),binding:ctx.binding,job});
       result=prior===r.kind?{queued:true,duplicate:true}:(r.kind==='actionable'?enqueueActionable:enqueueSilentCompletion)({root:path.join(ctx.stateRoot,'completions-v1'),inboxRoot:path.join(ctx.stateRoot,'codex-inbox-v2'),binding:ctx.binding,jobId:r.jobId});
      }
+     else if(r.kind==='attachment'){
+      const snapshot=readAttachmentRequest(latest,r.payload);
+      result=enqueueImmutableAttachment({root:path.join(ctx.stateRoot,'file-outbox'),inboxRoot:path.join(ctx.stateRoot,'codex-inbox-v2'),binding:ctx.binding,jobId:r.jobId,...snapshot});
+     }
      else if(r.kind==='link')result=this.options.taskResults.link(r.jobId,r.payload.targetJobId);
      else result=this.options.taskResults.submit(r.jobId,r.payload);
      const done={schema:1,scopeHash:ctx.scopeHash,requestKey:r.requestKey,requestHash:r.requestHash,status:'applied',at:(this.options.now??Date.now)(),
-      ...(result?.replyKey?{replyKey:result.replyKey}:{})};
+      ...(result?.replyKey?{replyKey:result.replyKey}:{}),...(r.kind==='attachment'?{fileKey:result.key}:{})};
      const target=path.join(ctx.receiptDir,`receipt-${r.requestKey}.json`);publishBackgroundJson(target,done);
      const proof=receipt(ctx,r.requestKey);if(!proof||proof.requestHash!==r.requestHash||proof.status!=='applied')fail('agent_request_receipt_invalid');
      if(['actionable','silent'].includes(r.kind))this.options.onClassification?.(r.jobId);
     }catch(error){
      // Unknown filesystem/callback outcomes remain pending. Store operations are
      // idempotent immutable publications, never a business/API replay.
-     const code=error.code??'';
+     const code=r.kind==='attachment'&&error.permanent&&(/^(?:attachment_[a-z_]+|invalid_attachment_snapshot)$/.test(error.code??''))?'agent_request_'+error.code:error.code??'';
      if(['task_result_prior_outstanding','task_result_publication_pending','agent_request_publication_pending'].includes(code)
       ||!/^agent_request_|^task_result_|^completion_|^unknown_completion_|^invalid_completion_/.test(code))continue;
      directories(ctx,{receipts:true});publishBackgroundJson(path.join(ctx.receiptDir,`receipt-${r.requestKey}.json`),

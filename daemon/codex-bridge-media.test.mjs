@@ -24,18 +24,22 @@ test('downloads real bytes into per-message directory; caches without downloadin
 });
 test('file name cannot choose the output path; UTF-8 filename and content retained',async t=>{
   const opts=fixture(t,async(_,args,root)=>{
-    assert.equal(args.at(-1),'./resource-0');const p=path.join(root,'resource-0.txt');fs.writeFileSync(p,'中文文件内容');return{saved_path:p};
+    assert.equal(args.at(-1),'./resource-0.payload.txt');const p=path.join(root,'resource-0.txt');fs.writeFileSync(p,'中文文件内容');return{saved_path:p};
   });
   const e={message_id:'om_file',message_type:'file',content:JSON.stringify({file_key:'file_v3_abc',file_name:'../../文件.txt'})};
   const p=await prepareInbound({bot:'test'},e,opts);assert.match(p.content,/resource-0.txt/);
 });
-test('rejects downloader escape, missing keys and oversized attachment',async t=>{
+test('unsafe, missing and oversized items produce explicit safe results without hiding the message',async t=>{
   const opts=fixture(t,async()=>({saved_path:import.meta.filename}));
   const e={message_id:'om_x',message_type:'image',content:'[Image: img_v3_abc]'};
-  await assert.rejects(prepareInbound({bot:'test'},e,opts),/outside_download_root/);
-  await assert.rejects(prepareInbound({bot:'test'},{...e,content:'no key'},opts),/key_missing/);
+  let prepared=await prepareInbound({bot:'test'},e,opts);
+  assert.equal(prepared.attachmentPreparationError,'attachment_outside_download_root');
+  assert.ok(!prepared.content.includes(import.meta.filename));
+  prepared=await prepareInbound({bot:'test'},{...e,content:'no key'},opts);
+  assert.equal(prepared.attachmentPreparationError,'attachment_resource_key_missing');
   opts.download=async(_,a,root)=>{const p=path.join(root,'large.bin');fs.writeFileSync(p,'');fs.truncateSync(p,51*1024*1024);return {saved_path:p};};
-  await assert.rejects(prepareInbound({bot:'test'},e,opts),/size_invalid/);
+  prepared=await prepareInbound({bot:'test'},e,opts);
+  assert.equal(prepared.attachmentPreparationError,'attachment_too_large');assert.match(prepared.content,/50 MiB/);
 });
 test('long multiline input uses a UTF-8 file without losing content or hitting argv limit',async t=>{
   const opts=fixture(t,async()=>{throw Error('not needed');});const content='中文长消息\n'.repeat(2000);

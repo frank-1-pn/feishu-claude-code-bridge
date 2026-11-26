@@ -3,19 +3,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { enqueueFile } from './codex-bridge-files.mjs';
+import {enqueueAgentAttachment} from './codex-bridge-agent-requests.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const opts = {};
 for (let i = 2; i < process.argv.length; i += 2) {
   const name = process.argv[i];
-  if (!['--bot', '--job-id', '--file', '--mode', '--cover'].includes(name) || !process.argv[i + 1]) throw Error('invalid_arguments');
+  if (!['--bot', '--job-id', '--file', '--mode', '--cover'].includes(name) || (!process.argv[i + 1] || name.slice(2) in opts)) throw Error('invalid_arguments');
   opts[name.slice(2)] = process.argv[i + 1];
 }
 try {
   const config = JSON.parse(fs.readFileSync(path.join(dir, 'codex-thread-bindings.json'), 'utf8').replace(/^\uFEFF/, ''));
   const binding = config.bindings[opts.bot];
   if (!binding || !/^[A-Za-z0-9_-]+$/.test(opts.bot)) throw Error('unknown_bot');
-  const result = enqueueFile({ root: path.join(dir, 'state', 'file-outbox'), inboxRoot: path.join(dir, 'state', 'codex-inbox-v2'),
+  const result = binding.group_access==='all_group_humans' ? enqueueAgentAttachment({stateRoot:path.join(dir,'state'),configFile:path.join(dir,'codex-thread-bindings.json'),
+    binding:{...binding,bot:opts.bot},codexHome:config.runtime?.codex_home,jobId:opts['job-id'],file:opts.file,mode:opts.mode,cover:opts.cover}) : enqueueFile({ root: path.join(dir, 'state', 'file-outbox'), inboxRoot: path.join(dir, 'state', 'codex-inbox-v2'),
     binding: { ...binding, bot: opts.bot }, jobId: opts['job-id'], file: opts.file, mode: opts.mode, cover: opts.cover });
   process.stdout.write(JSON.stringify({ ok: true, ...result }) + '\n');
 } catch (error) {

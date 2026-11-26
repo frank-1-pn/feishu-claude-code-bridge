@@ -32,23 +32,43 @@ export function normalizeEvent(event) {
   const raw = typeof event.content === 'string' ? event.content : JSON.stringify(event.content ?? {});
   let obj;
   try { obj = JSON.parse(raw); } catch { obj = null; }
-  const resources = [];
-  const add = (key, kind, name = '') => {
-    if (typeof key !== 'string' || !/^(img|file)_[A-Za-z0-9_-]{1,240}$/.test(key)) return;
-    if (!resources.some(r => r.key === key)) resources.push({ key, kind, name });
+  const resources = [], resourceErrors = [];
+  const issue = code => { if (!resourceErrors.includes(code)) resourceErrors.push(code); };
+  const metadata = o => Object.fromEntries(['file_name','file_size','size','mime_type','duration','width','height']
+    .filter(k => typeof o[k] === 'string' || typeof o[k] === 'number' && Number.isFinite(o[k]))
+    .map(k => [k, typeof o[k] === 'string' ? o[k].slice(0, 1024) : o[k]]));
+  const add = (key, kind, source = {}) => {
+    if (typeof key !== 'string' || !/^(img|file)_[A-Za-z0-9_-]{1,240}$/.test(key)) {
+      issue(key ? 'attachment_resource_key_invalid' : 'attachment_resource_key_missing'); return;
+    }
+    const name = typeof source.file_name === 'string' ? source.file_name.slice(0, 1024) : '';
+    const existing = resources.find(r => r.key === key);
+    if (existing) {
+      if (!existing.name && name) existing.name = name;
+      existing.metadata = { ...metadata(source), ...existing.metadata }; return;
+    }
+    if (resources.length >= 20) { issue('attachment_resource_limit'); return; }
+    resources.push({ key, kind, name, metadata: metadata(source) });
   };
-  const visit = (o) => {
+  let visited = 0;
+  const visit = (o, depth = 0) => {
     if (!o || typeof o !== 'object') return;
-    if (o.image_key) add(o.image_key, 'image');
-    if (o.file_key) add(o.file_key, 'file', String(o.file_name ?? '').slice(0, 200));
-    for (const v of Object.values(o)) if (v && typeof v === 'object') visit(v);
+    if (++visited > 4096 || depth > 32) { issue('attachment_structure_limit'); return; }
+    if (Object.hasOwn(o, 'image_key')) add(o.image_key, 'image', o);
+    if (Object.hasOwn(o, 'file_key')) add(o.file_key, 'file', o);
+    const tag = String(o.tag ?? '').toLowerCase();
+    if (['img','image','file','audio','video','media','sticker'].includes(tag)
+      && !Object.hasOwn(o, 'image_key') && !Object.hasOwn(o, 'file_key')) issue('attachment_resource_key_missing');
+    for (const v of Object.values(o)) if (v && typeof v === 'object' && visited <= 4096) visit(v, depth + 1);
   };
   if (type !== 'text') visit(obj);
   // lark-cli compact NDJSON uses [Image: img_...] / [File: ... file_...].
   if (type !== 'text' && !obj) for (const m of raw.matchAll(/\b(img|file)_v\d+_[A-Za-z0-9_-]{1,240}/g)) add(m[0], m[1] === 'img' ? 'image' : 'file');
   const supported = ['text', 'image', 'file', 'post', 'audio', 'video', 'media', 'sticker'].includes(type);
+  if (['image','file','audio','video','media','sticker'].includes(type) && !resources.length && !resourceErrors.length)
+    issue('attachment_resource_key_missing');
   const text = type === 'text' && typeof obj?.text === 'string' ? obj.text : raw;
-  return { text, resources, supported, type };
+  return { text, resources, resourceErrors, supported, type };
 }
 
 // One private durable record per message. Intake advances its byte cursor only
